@@ -1,5 +1,5 @@
 # pip install pyTelegramBotAPI SQLAlchemy psycopg2-binary APScheduler pytz requests
-# В Railway.app укажи переменные окружения: BOT_TOKEN, DATABASE_URL, DEFAPI_KEY (опц.)
+# В Railway.app укажи переменные окружения: BOT_TOKEN, DATABASE_URL, DEFAPI_KEY (опц.)x
 
 import os
 import io
