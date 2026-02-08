@@ -197,6 +197,7 @@ def cmd_help(msg):
         "/teams — показать составы\n"
         "/record — записать матч\n"
         "/reset_month — обнулить статистику месяца\n"
+        "/poll — отправить poll вручную\n"
         "/mvp — poll MVP дня\n\n"
         "Для всех:\n"
         "/stats — статистика"
@@ -636,6 +637,25 @@ def cmd_reset_month(msg):
         bot.reply_to(msg, f'Статистика за {month} обнулена.')
     finally:
         session.close()
+
+
+# ─── /poll — ручная отправка poll-а в чат ─────────────────────────────────────
+
+@bot.message_handler(commands=['poll'])
+def cmd_poll(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    bot.send_poll(
+        chat_id=msg.chat.id,
+        question='Сегодня вечером играем?',
+        options=[
+            'Играю по абонементу',
+            'Не играю сегодня',
+            'Хочу вписаться за разовую',
+        ],
+        is_anonymous=False,
+        allows_multiple_answers=False,
+    )
 
 
 # ─── /mvp ────────────────────────────────────────────────────────────────────
