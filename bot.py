@@ -683,6 +683,7 @@ def _defapi_generate_image(prompt):
         return None
     headers = {
         'Authorization': f'Bearer {DEFAPI_KEY}',
+        'Accept': 'application/json',
         'Content-Type': 'application/json',
     }
     # Создаём задачу
@@ -705,12 +706,21 @@ def _defapi_generate_image(prompt):
             headers=headers,
             timeout=15,
         )
-        result = r.json()
-        status = result.get('data', {}).get('status')
-        if status == 'success':
-            images = result['data'].get('images') or result['data'].get('output', [])
-            if images:
-                return images[0] if isinstance(images[0], str) else images[0].get('url')
+        task = r.json()
+        task_data = task.get('data', {})
+        status = task_data.get('status')
+        if status in ('success', 'completed'):
+            result = task_data.get('result')
+            if not result:
+                return None
+            # result может быть строкой (URL), списком URL-ов, или объектом
+            if isinstance(result, str):
+                return result
+            if isinstance(result, list) and result:
+                item = result[0]
+                return item if isinstance(item, str) else item.get('url')
+            if isinstance(result, dict):
+                return result.get('url') or result.get('image')
             return None
         if status == 'failed':
             return None
