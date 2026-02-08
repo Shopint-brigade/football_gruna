@@ -981,13 +981,24 @@ def _send_stats_image(msg, stats_text, caption):
     bot.reply_to(msg, 'Генерирую картинку...')
 
     prompt = (
-        "Create a beautiful dark-themed sports statistics infographic card for a football (soccer) group. "
-        "Use a sleek modern design with a dark gradient background (dark blue to black). "
-        "Include a football icon at the top. "
-        "Render ALL the following text EXACTLY as shown, with clear readable white font:\n\n"
+        "Create a professional football league statistics board. "
+        "Dark background with gradient from dark blue to black. "
+        "Style it like a real football league table display seen on TV broadcasts. "
+        "Use a structured table layout with columns, rows, and grid lines. "
+        "Add a golden trophy icon or football emblem at the top as a logo. "
+        "Use team color badges/shields next to team names. "
+        "Numbers should be in bold white, headers in golden/yellow color. "
+        "Add subtle glow effects on important numbers. "
+        "Make it look like an official Premier League or Champions League stats screen. "
+        "Include ALL the following data EXACTLY as written, formatted into proper table rows:\n\n"
         f"{stats_text}\n\n"
-        "Use clean typography, subtle neon accent lines as separators, and a professional sports layout. "
-        "The text must be perfectly legible and rendered exactly as provided above."
+        "Layout rules: "
+        "- Title at the top in large bold font "
+        "- Team standings in a proper table with alternating row colors (dark grey / slightly lighter grey) "
+        "- Match results in a scoreboard style with team names on each side and score in the center "
+        "- Top scorers section with player names and goal counts with small football icons "
+        "- Team rosters at the bottom in a compact card style "
+        "- All text must be perfectly readable, crisp and exact as provided above"
     )
 
     image_url = _defapi_generate_image(prompt)
