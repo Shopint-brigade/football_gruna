@@ -223,7 +223,7 @@ def cmd_help(msg):
         "/clear_today — очистить данные дня\n"
         "/set_teams N — задать кол-во команд (2–6)\n"
         "/set_team_name N Имя — название команды\n"
-        "/add_to_team N @user — добавить в команду\n"
+        "/add_to_team  — добавить в команду\n"
         "/teams — показать составы\n"
         "/record — записать матч\n"
         "/reset_month — обнулить статистику месяца\n"
@@ -336,45 +336,180 @@ def cmd_set_team_name(msg):
         session.close()
 
 
+# ─── /add_to_team — interactive team assignment ─────────────────────────────
+
+def _get_unassigned_players(session):
+    players = get_today_players(session)
+    assigned = session.query(TeamToday.player_username).filter(
+        TeamToday.date == today(),
+        TeamToday.player_username != '__placeholder__'
+    ).all()
+    assigned_set = {a[0] for a in assigned}
+    return [p for p in players if p.username not in assigned_set]
+
+
+def _build_team_summary(session):
+    dn = get_display_names(session)
+    teams = session.query(TeamToday).filter(
+        TeamToday.date == today(),
+        TeamToday.player_username != '__placeholder__'
+    ).order_by(TeamToday.team_number).all()
+    if not teams:
+        return 'Пока никто не распределён.'
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    tnames = {}
+    for t in teams:
+        grouped[t.team_number].append(t.player_username)
+        tnames[t.team_number] = t.team_name
+    lines = []
+    for num in sorted(grouped.keys()):
+        name = tnames.get(num, f'Команда {num}')
+        parts = []
+        for u in grouped[num]:
+            real = dn.get(u)
+            parts.append(f'{real} (@{u})' if real else f'@{u}')
+        lines.append(f'#{num} «{name}»: {", ".join(parts)}')
+    return '\n'.join(lines)
+
+
+def _send_player_selection(chat_id, uid, state):
+    session = Session()
+    try:
+        unassigned = _get_unassigned_players(session)
+        dn = get_display_names(session)
+        state['display_names'] = dn
+        summary = _build_team_summary(session)
+    finally:
+        session.close()
+    if not unassigned:
+        bot.send_message(chat_id, f'Все игроки распределены!\n\n{summary}')
+        if uid in user_states:
+            del user_states[uid]
+        return
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = []
+    for p in unassigned:
+        real = dn.get(p.username)
+        label = f'{real} (@{p.username})' if real else f'@{p.username}'
+        buttons.append(types.InlineKeyboardButton(
+            label, callback_data=f'att_player:{p.username}'
+        ))
+    for i in range(0, len(buttons), 2):
+        markup.row(*buttons[i:i + 2])
+    markup.row(types.InlineKeyboardButton('✅ Готово', callback_data='att_done'))
+    text = f'Текущие составы:\n{summary}\n\nНераспределённых: {len(unassigned)}\nВыбери игрока:'
+    bot.send_message(chat_id, text, reply_markup=markup)
+
+
+def _send_team_selection(chat_id, state, username):
+    dn = state.get('display_names', {})
+    real = dn.get(username)
+    player_label = f'{real} (@{username})' if real else f'@{username}'
+    team_names = state['team_names']
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = []
+    for num in sorted(team_names.keys()):
+        buttons.append(types.InlineKeyboardButton(
+            f'{num}. {team_names[num]}',
+            callback_data=f'att_team:{num}:{username}'
+        ))
+    for i in range(0, len(buttons), 2):
+        markup.row(*buttons[i:i + 2])
+    markup.row(types.InlineKeyboardButton('⬅️ Назад', callback_data='att_back'))
+    bot.send_message(chat_id, f'В какую команду добавить {player_label}?', reply_markup=markup)
+
+
 @bot.message_handler(commands=['add_to_team'])
 def cmd_add_to_team(msg):
     if not is_admin(msg.from_user.id):
         return
-    parts = msg.text.split()
-    if len(parts) < 3 or not parts[1].isdigit():
-        bot.reply_to(msg, 'Формат: /add_to_team N @username')
-        return
-    num = int(parts[1])
-    username = parts[2].lstrip('@')
     session = Session()
     try:
-        # Проверяем, что игрок в сегодняшнем списке
+        team_names = get_team_names_today(session)
+        if not team_names:
+            bot.reply_to(msg, 'Сначала создай команды: /set_teams')
+            return
         players = get_today_players(session)
-        player_names = [p.username for p in players]
-        if username not in player_names:
-            bot.reply_to(msg, f'@{username} нет в списке сегодняшних игроков.')
+        if not players:
+            bot.reply_to(msg, 'Сегодня пока никто не записался.')
             return
-        # Проверяем, что команда существует
-        team_exists = session.query(TeamToday).filter(
-            TeamToday.date == today(), TeamToday.team_number == num
-        ).first()
-        if not team_exists:
-            bot.reply_to(msg, f'Команда #{num} не найдена.')
-            return
-        team_name = team_exists.team_name
-        # Убираем игрока из других команд сегодня
-        session.query(TeamToday).filter(
-            TeamToday.date == today(),
-            TeamToday.player_username == username
-        ).delete()
-        session.add(TeamToday(
-            date=today(), team_number=num,
-            team_name=team_name, player_username=username
-        ))
-        session.commit()
-        bot.reply_to(msg, f'@{username} добавлен в команду #{num} «{team_name}»')
+        dn = get_display_names(session)
     finally:
         session.close()
+    if msg.from_user.id in user_states:
+        del user_states[msg.from_user.id]
+    state = {
+        'mode': 'add_to_team',
+        'team_names': team_names,
+        'display_names': dn,
+    }
+    user_states[msg.from_user.id] = state
+    _send_player_selection(msg.chat.id, msg.from_user.id, state)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('att_'))
+def handle_add_to_team_callback(call):
+    uid = call.from_user.id
+    if uid not in user_states or user_states[uid].get('mode') != 'add_to_team':
+        bot.answer_callback_query(call.id, 'Сессия не активна. Используй /add_to_team')
+        return
+    state = user_states[uid]
+    data = call.data
+
+    if data == 'att_done':
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        session = Session()
+        try:
+            summary = _build_team_summary(session)
+        finally:
+            session.close()
+        bot.send_message(call.message.chat.id, f'Распределение завершено!\n\n{summary}')
+        del user_states[uid]
+
+    elif data == 'att_back':
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        _send_player_selection(call.message.chat.id, uid, state)
+
+    elif data.startswith('att_player:'):
+        username = data.split(':', 1)[1]
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        _send_team_selection(call.message.chat.id, state, username)
+
+    elif data.startswith('att_team:'):
+        parts = data.split(':', 2)
+        team_num = int(parts[1])
+        username = parts[2]
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        session = Session()
+        try:
+            team_names = state['team_names']
+            team_name = team_names.get(team_num, f'Команда {team_num}')
+            session.query(TeamToday).filter(
+                TeamToday.date == today(),
+                TeamToday.player_username == username
+            ).delete()
+            session.add(TeamToday(
+                date=today(), team_number=team_num,
+                team_name=team_name, player_username=username
+            ))
+            session.commit()
+            dn = get_display_names(session)
+            state['display_names'] = dn
+            real = dn.get(username)
+            label = f'{real} (@{username})' if real else f'@{username}'
+        finally:
+            session.close()
+        bot.send_message(
+            call.message.chat.id,
+            f'✅ {label} → #{team_num} «{team_names.get(team_num, "")}»'
+        )
+        _send_player_selection(call.message.chat.id, uid, state)
+
 
 
 @bot.message_handler(commands=['teams'])
@@ -435,89 +570,7 @@ def cmd_record(msg):
 @bot.message_handler(func=lambda m: m.from_user.id in user_states
                      and user_states[m.from_user.id].get('mode') == 'record'
                      and not m.text.startswith('/'))
-def handle_record_steps(msg):
 
-    uid = msg.from_user.id
-    state = user_states[uid]
-    text = msg.text.strip()
-
-    # Отмена
-    if text.lower() in ('/cancel', 'отмена'):
-        del user_states[uid]
-        bot.reply_to(msg, 'Запись отменена.', reply_markup=types.ReplyKeyboardRemove())
-        return
-
-    step = state['step']
-    teams = state['teams']
-
-    # Шаг 1: выбор команды A
-    if step == 1:
-        num = _parse_team_choice(text, teams)
-        if num is None:
-            bot.reply_to(msg, 'Выбери команду из списка.')
-            return
-        state['team_a'] = num
-        state['step'] = 2
-        # Клавиатура без выбранной команды
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        for n in sorted(teams.keys()):
-            if n != num:
-                markup.add(f'{n}. {teams[n]}')
-        bot.reply_to(msg, 'Шаг 2: Выбери команду B:', reply_markup=markup)
-
-    # Шаг 2: выбор команды B
-    elif step == 2:
-        num = _parse_team_choice(text, teams)
-        if num is None or num == state['team_a']:
-            bot.reply_to(msg, 'Выбери другую команду.')
-            return
-        state['team_b'] = num
-        state['step'] = 3
-        bot.reply_to(msg, 'Шаг 3: Введи счёт (например, 5:3):',
-                     reply_markup=types.ReplyKeyboardRemove())
-
-    # Шаг 3: ввод счёта
-    elif step == 3:
-        if ':' not in text:
-            bot.reply_to(msg, 'Формат счёта: 5:3')
-            return
-        parts = text.split(':')
-        if len(parts) != 2 or not parts[0].strip().isdigit() or not parts[1].strip().isdigit():
-            bot.reply_to(msg, 'Формат счёта: 5:3')
-            return
-        state['score_a'] = int(parts[0].strip())
-        state['score_b'] = int(parts[1].strip())
-        state['step'] = 4
-        state['goals'] = []
-        # Получаем игроков обеих команд для inline-кнопок
-        session = Session()
-        try:
-            dn = get_display_names(session)
-            team_players = session.query(TeamToday).filter(
-                TeamToday.date == today(),
-                TeamToday.team_number.in_([state['team_a'], state['team_b']]),
-                TeamToday.player_username != '__placeholder__'
-            ).all()
-            state['match_players'] = [t.player_username for t in team_players]
-            state['display_names'] = dn
-        finally:
-            session.close()
-        _send_goals_keyboard(msg.chat.id, state, 'Шаг 4: Кто забил? Нажми на игрока:')
-
-    # Шаг 4 (подшаг): ввод кол-ва голов текстом
-    elif step == 4 and state.get('awaiting_count_for'):
-        username = state['awaiting_count_for']
-        if not text.isdigit() or int(text) < 1:
-            bot.reply_to(msg, 'Введи число голов (1, 2, 3, ...).')
-            return
-        count = int(text)
-        state['goals'].append({'username': username, 'count': count})
-        del state['awaiting_count_for']
-        dn = state.get('display_names', {})
-        real = dn.get(username)
-        label = f'{real} (@{username})' if real else f'@{username}'
-        bot.reply_to(msg, f'{label}: {count} гол.')
-        _send_goals_keyboard(msg.chat.id, state, 'Кто ещё забил?')
 
 
 def _parse_team_choice(text, teams):
@@ -1008,6 +1061,90 @@ def cmd_mvp(msg):
     finally:
         session.close()
 
+
+def handle_record_steps(msg):
+
+    uid = msg.from_user.id
+    state = user_states[uid]
+    text = msg.text.strip()
+
+    # Отмена
+    if text.lower() in ('/cancel', 'отмена'):
+        del user_states[uid]
+        bot.reply_to(msg, 'Запись отменена.', reply_markup=types.ReplyKeyboardRemove())
+        return
+
+    step = state['step']
+    teams = state['teams']
+
+    # Шаг 1: выбор команды A
+    if step == 1:
+        num = _parse_team_choice(text, teams)
+        if num is None:
+            bot.reply_to(msg, 'Выбери команду из списка.')
+            return
+        state['team_a'] = num
+        state['step'] = 2
+        # Клавиатура без выбранной команды
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        for n in sorted(teams.keys()):
+            if n != num:
+                markup.add(f'{n}. {teams[n]}')
+        bot.reply_to(msg, 'Шаг 2: Выбери команду B:', reply_markup=markup)
+
+    # Шаг 2: выбор команды B
+    elif step == 2:
+        num = _parse_team_choice(text, teams)
+        if num is None or num == state['team_a']:
+            bot.reply_to(msg, 'Выбери другую команду.')
+            return
+        state['team_b'] = num
+        state['step'] = 3
+        bot.reply_to(msg, 'Шаг 3: Введи счёт (например, 5:3):',
+                     reply_markup=types.ReplyKeyboardRemove())
+
+    # Шаг 3: ввод счёта
+    elif step == 3:
+        if ':' not in text:
+            bot.reply_to(msg, 'Формат счёта: 5:3')
+            return
+        parts = text.split(':')
+        if len(parts) != 2 or not parts[0].strip().isdigit() or not parts[1].strip().isdigit():
+            bot.reply_to(msg, 'Формат счёта: 5:3')
+            return
+        state['score_a'] = int(parts[0].strip())
+        state['score_b'] = int(parts[1].strip())
+        state['step'] = 4
+        state['goals'] = []
+        # Получаем игроков обеих команд для inline-кнопок
+        session = Session()
+        try:
+            dn = get_display_names(session)
+            team_players = session.query(TeamToday).filter(
+                TeamToday.date == today(),
+                TeamToday.team_number.in_([state['team_a'], state['team_b']]),
+                TeamToday.player_username != '__placeholder__'
+            ).all()
+            state['match_players'] = [t.player_username for t in team_players]
+            state['display_names'] = dn
+        finally:
+            session.close()
+        _send_goals_keyboard(msg.chat.id, state, 'Шаг 4: Кто забил? Нажми на игрока:')
+
+    # Шаг 4 (подшаг): ввод кол-ва голов текстом
+    elif step == 4 and state.get('awaiting_count_for'):
+        username = state['awaiting_count_for']
+        if not text.isdigit() or int(text) < 1:
+            bot.reply_to(msg, 'Введи число голов (1, 2, 3, ...).')
+            return
+        count = int(text)
+        state['goals'].append({'username': username, 'count': count})
+        del state['awaiting_count_for']
+        dn = state.get('display_names', {})
+        real = dn.get(username)
+        label = f'{real} (@{username})' if real else f'@{username}'
+        bot.reply_to(msg, f'{label}: {count} гол.')
+        _send_goals_keyboard(msg.chat.id, state, 'Кто ещё забил?')
 
 # ─── Запуск ──────────────────────────────────────────────────────────────────
 
