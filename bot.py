@@ -1,8 +1,11 @@
-# pip install pyTelegramBotAPI SQLAlchemy psycopg2-binary APScheduler pytz
-# В Railway.app укажи переменные окружения: BOT_TOKEN и DATABASE_URL
+# pip install pyTelegramBotAPI SQLAlchemy psycopg2-binary APScheduler pytz requests
+# В Railway.app укажи переменные окружения: BOT_TOKEN, DATABASE_URL, DEFAPI_KEY (опц.)
 
 import os
+import io
+import time
 import datetime
+import requests
 import telebot
 from telebot import types
 from sqlalchemy import create_engine, Column, Integer, String, Date, ForeignKey
@@ -20,6 +23,7 @@ if DATABASE_URL.startswith('postgres://'):
 
 CHAT_ID = int(os.environ.get('CHAT_ID', '0'))  # ID группы для авто-poll
 ADMIN_IDS = [int(x) for x in os.environ.get('ADMIN_IDS', '123456789').split(',')]
+DEFAPI_KEY = os.environ.get('DEFAPI_KEY', '')  # ключ DefAPI для генерации картинок
 TZ = pytz.timezone('Europe/Moscow')
 
 DEFAULT_TEAM_NAMES = ['Красные', 'Синие', 'Зелёные', 'Жёлтые', 'Белые', 'Чёрные']
@@ -226,7 +230,8 @@ def cmd_help(msg):
         "/poll — отправить poll вручную\n"
         "/mvp — poll MVP дня\n\n"
         "Для всех:\n"
-        "/stats — статистика"
+        "/stats — статистика\n"
+        "/stats_img — статистика картинкой"
     )
     bot.reply_to(msg, text)
 
@@ -610,50 +615,154 @@ def _update_team_stats(session, state, month):
 
 # ─── /stats ──────────────────────────────────────────────────────────────────
 
+def _build_stats_text(session):
+    """Собирает текст статистики за текущий месяц."""
+    month = current_month()
+    lines = [f'Статистика за {month}']
+    lines.append('━' * 24)
+
+    # Игроки
+    dn = get_display_names(session)
+    players = session.query(PlayerStat).filter(
+        PlayerStat.month == month
+    ).order_by(PlayerStat.goals.desc()).all()
+    if players:
+        lines.append('')
+        lines.append('Игроки:')
+        for i, p in enumerate(players, 1):
+            real = dn.get(p.username)
+            name = f'{real} (@{p.username})' if real else f'@{p.username}'
+            lines.append(
+                f'  {i}. {name}\n'
+                f'      {p.goals} гол. | {p.matches} матч. | {p.wins} побед'
+            )
+
+    # Команды
+    teams = session.query(TeamStat).filter(
+        TeamStat.month == month
+    ).order_by(TeamStat.points.desc()).all()
+    if teams:
+        lines.append('')
+        lines.append('Команды:')
+        for t in teams:
+            tname = t.team_num_or_name.split('_', 1)[1] if '_' in t.team_num_or_name else t.team_num_or_name
+            lines.append(
+                f'  {tname}: {t.points} очк. | '
+                f'{t.goals_scored} заб. | {t.goals_conceded} проп.'
+            )
+
+    # Матчи за сегодня
+    today_matches = session.query(Match).filter(Match.date == today()).all()
+    if today_matches:
+        team_names = get_team_names_today(session)
+        lines.append('')
+        lines.append(f'Матчи ({today()}):')
+        for m in today_matches:
+            na = team_names.get(m.team_a_num, f'Команда {m.team_a_num}')
+            nb = team_names.get(m.team_b_num, f'Команда {m.team_b_num}')
+            lines.append(f'  {na}  {m.score_a} : {m.score_b}  {nb}')
+
+    return '\n'.join(lines) if len(lines) > 2 else None
+
+
 @bot.message_handler(commands=['stats'])
 def cmd_stats(msg):
     session = Session()
     try:
-        month = current_month()
-        lines = [f'Статистика за {month}\n']
-
-        # Игроки
-        dn = get_display_names(session)
-        players = session.query(PlayerStat).filter(
-            PlayerStat.month == month
-        ).order_by(PlayerStat.goals.desc()).all()
-        if players:
-            lines.append('Игроки:')
-            for p in players:
-                real = dn.get(p.username)
-                label = f'{real} @{p.username}' if real else f'@{p.username}'
-                lines.append(
-                    f'  {label}: {p.goals} гол., '
-                    f'{p.matches} матч., {p.wins} побед'
-                )
-
-        # Команды
-        teams = session.query(TeamStat).filter(
-            TeamStat.month == month
-        ).order_by(TeamStat.points.desc()).all()
-        if teams:
-            lines.append('\nКоманды:')
-            for t in teams:
-                lines.append(
-                    f'  {t.team_num_or_name}: {t.points} очк., '
-                    f'{t.goals_scored} заб., {t.goals_conceded} проп.'
-                )
-
-        # Статистика за сегодня
-        today_matches = session.query(Match).filter(Match.date == today()).all()
-        if today_matches:
-            lines.append(f'\nМатчи за сегодня ({today()}):')
-            for m in today_matches:
-                lines.append(f'  Команда {m.team_a_num} {m.score_a}:{m.score_b} Команда {m.team_b_num}')
-
-        bot.reply_to(msg, '\n'.join(lines) if len(lines) > 1 else 'Статистика пока пуста.')
+        text = _build_stats_text(session)
+        bot.reply_to(msg, text or 'Статистика пока пуста.')
     finally:
         session.close()
+
+
+# ─── /stats_img — статистика картинкой (Nano Banana Pro) ─────────────────────
+
+def _defapi_generate_image(prompt):
+    """Отправляет запрос в DefAPI и возвращает URL картинки или None."""
+    if not DEFAPI_KEY:
+        return None
+    headers = {
+        'Authorization': f'Bearer {DEFAPI_KEY}',
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+    }
+    # Создаём задачу
+    resp = requests.post(
+        'https://api.defapi.org/api/image/gen',
+        headers=headers,
+        json={'model': 'google/nano-banana-pro', 'prompt': prompt},
+        timeout=30,
+    )
+    data = resp.json()
+    if data.get('code') != 0:
+        return None
+    task_id = data['data']['task_id']
+
+    # Ждём результат (макс. ~60 сек)
+    for _ in range(20):
+        time.sleep(3)
+        r = requests.get(
+            f'https://api.defapi.org/api/task/query?task_id={task_id}',
+            headers=headers,
+            timeout=15,
+        )
+        task = r.json()
+        task_data = task.get('data', {})
+        status = task_data.get('status')
+        if status in ('success', 'completed'):
+            result = task_data.get('result')
+            if not result:
+                return None
+            # result может быть строкой (URL), списком URL-ов, или объектом
+            if isinstance(result, str):
+                return result
+            if isinstance(result, list) and result:
+                item = result[0]
+                return item if isinstance(item, str) else item.get('url')
+            if isinstance(result, dict):
+                return result.get('url') or result.get('image')
+            return None
+        if status == 'failed':
+            return None
+    return None
+
+
+@bot.message_handler(commands=['stats_img'])
+def cmd_stats_img(msg):
+    if not DEFAPI_KEY:
+        bot.reply_to(msg, 'DEFAPI_KEY не настроен.')
+        return
+    session = Session()
+    try:
+        stats_text = _build_stats_text(session)
+    finally:
+        session.close()
+    if not stats_text:
+        bot.reply_to(msg, 'Статистика пока пуста.')
+        return
+
+    bot.reply_to(msg, 'Генерирую картинку...')
+
+    prompt = (
+        "Create a beautiful dark-themed sports statistics infographic card for a football (soccer) group. "
+        "Use a sleek modern design with a dark gradient background (dark blue to black). "
+        "Include a football icon at the top. "
+        "Render ALL the following text EXACTLY as shown, with clear readable white font:\n\n"
+        f"{stats_text}\n\n"
+        "Use clean typography, subtle neon accent lines as separators, and a professional sports layout. "
+        "The text must be perfectly legible and rendered exactly as provided above."
+    )
+
+    image_url = _defapi_generate_image(prompt)
+    if not image_url:
+        bot.reply_to(msg, 'Не удалось сгенерировать картинку.')
+        return
+    try:
+        img_resp = requests.get(image_url, timeout=30)
+        img_resp.raise_for_status()
+        bot.send_photo(msg.chat.id, io.BytesIO(img_resp.content), caption=f'Статистика за {current_month()}')
+    except Exception:
+        bot.reply_to(msg, 'Не удалось загрузить картинку.')
 
 
 # ─── /reset_month ────────────────────────────────────────────────────────────
