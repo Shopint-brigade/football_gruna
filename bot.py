@@ -500,6 +500,21 @@ def handle_record_steps(msg):
             session.close()
         _send_goals_keyboard(msg.chat.id, state, 'Шаг 4: Кто забил? Нажми на игрока:')
 
+    # Шаг 4 (подшаг): ввод кол-ва голов текстом
+    elif step == 4 and state.get('awaiting_count_for'):
+        username = state['awaiting_count_for']
+        if not text.isdigit() or int(text) < 1:
+            bot.reply_to(msg, 'Введи число голов (1, 2, 3, ...).')
+            return
+        count = int(text)
+        state['goals'].append({'username': username, 'count': count})
+        del state['awaiting_count_for']
+        dn = state.get('display_names', {})
+        real = dn.get(username)
+        label = f'{real} (@{username})' if real else f'@{username}'
+        bot.reply_to(msg, f'{label}: {count} гол.')
+        _send_goals_keyboard(msg.chat.id, state, 'Кто ещё забил?')
+
 
 def _parse_team_choice(text, teams):
     """Парсит выбор команды из текста вида '1. Красные' или просто '1'."""
@@ -538,18 +553,6 @@ def _send_goals_keyboard(chat_id, state, text):
     bot.send_message(chat_id, text, reply_markup=markup)
 
 
-def _send_count_keyboard(chat_id, username, dn):
-    """Отправляет inline-клавиатуру для выбора кол-ва голов."""
-    real = dn.get(username)
-    label = f'{real} (@{username})' if real else f'@{username}'
-    markup = types.InlineKeyboardMarkup(row_width=5)
-    markup.row(
-        *[types.InlineKeyboardButton(str(n), callback_data=f'goal_count:{username}:{n}')
-          for n in range(1, 6)]
-    )
-    markup.row(types.InlineKeyboardButton('Назад', callback_data='goal_back'))
-    bot.send_message(chat_id, f'Сколько голов у {label}?', reply_markup=markup)
-
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('goal_'))
 def handle_goal_callback(call):
@@ -566,28 +569,18 @@ def handle_goal_callback(call):
         _finish_match(call.message, state)
         del user_states[uid]
 
-    elif data == 'goal_back':
-        bot.answer_callback_query(call.id)
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        _send_goals_keyboard(call.message.chat.id, state, 'Кто забил? Нажми на игрока:')
-
     elif data.startswith('goal_player:'):
         username = data.split(':', 1)[1]
+        state['awaiting_count_for'] = username
         bot.answer_callback_query(call.id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
-        _send_count_keyboard(call.message.chat.id, username, state.get('display_names', {}))
-
-    elif data.startswith('goal_count:'):
-        parts = data.split(':')
-        username = parts[1]
-        count = int(parts[2])
-        state['goals'].append({'username': username, 'count': count})
         dn = state.get('display_names', {})
         real = dn.get(username)
         label = f'{real} (@{username})' if real else f'@{username}'
-        bot.answer_callback_query(call.id, f'{label}: {count} гол.')
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        _send_goals_keyboard(call.message.chat.id, state, 'Кто ещё забил?')
+        bot.send_message(
+            call.message.chat.id,
+            f'Сколько голов у {label}? Введи число:',
+        )
 
 
 def _finish_match(msg, state):
