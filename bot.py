@@ -759,47 +759,64 @@ def cmd_stats_month(msg):
 def _defapi_generate_image(prompt):
     """Отправляет запрос в DefAPI и возвращает URL картинки или None."""
     if not DEFAPI_KEY:
+        print('[DefAPI] DEFAPI_KEY не задан')
         return None
     headers = {
         'Authorization': f'Bearer {DEFAPI_KEY}',
         'Accept': 'application/json',
         'Content-Type': 'application/json',
     }
-    resp = requests.post(
-        'https://api.defapi.org/api/image/gen',
-        headers=headers,
-        json={'model': 'google/nano-banana-pro', 'prompt': prompt},
-        timeout=30,
-    )
-    data = resp.json()
-    if data.get('code') != 0:
-        return None
-    task_id = data['data']['task_id']
-
-    for _ in range(20):
-        time.sleep(3)
-        r = requests.get(
-            f'https://api.defapi.org/api/task/query?task_id={task_id}',
+    try:
+        resp = requests.post(
+            'https://api.defapi.org/api/image/gen',
             headers=headers,
-            timeout=15,
+            json={'model': 'google/nano-banana-pro', 'prompt': prompt},
+            timeout=30,
         )
-        task = r.json()
-        task_data = task.get('data', {})
-        status = task_data.get('status')
-        if status in ('success', 'completed'):
-            result = task_data.get('result')
-            if not result:
+        print(f'[DefAPI] POST /api/image/gen → {resp.status_code}')
+        data = resp.json()
+        print(f'[DefAPI] Response: {data}')
+        if data.get('code') != 0:
+            print(f'[DefAPI] Error: {data.get("message")} | {data.get("detail")}')
+            return None
+        task_id = data['data']['task_id']
+        print(f'[DefAPI] Task created: {task_id}')
+    except Exception as e:
+        print(f'[DefAPI] POST failed: {e}')
+        return None
+
+    for attempt in range(20):
+        time.sleep(3)
+        try:
+            r = requests.get(
+                f'https://api.defapi.org/api/task/query?task_id={task_id}',
+                headers=headers,
+                timeout=15,
+            )
+            task_resp = r.json()
+            task_data = task_resp.get('data', {})
+            status = task_data.get('status')
+            print(f'[DefAPI] Poll #{attempt+1}: status={status}')
+            if status in ('success', 'completed'):
+                result = task_data.get('result')
+                print(f'[DefAPI] Result type={type(result).__name__}, value={str(result)[:200]}')
+                if not result:
+                    return None
+                if isinstance(result, str):
+                    return result
+                if isinstance(result, list) and result:
+                    item = result[0]
+                    return item if isinstance(item, str) else item.get('url')
+                if isinstance(result, dict):
+                    return result.get('url') or result.get('image')
                 return None
-            if isinstance(result, str):
-                return result
-            if isinstance(result, list) and result:
-                item = result[0]
-                return item if isinstance(item, str) else item.get('url')
-            if isinstance(result, dict):
-                return result.get('url') or result.get('image')
-            return None
-        if status == 'failed':
-            return None
+            if status == 'failed':
+                reason = task_data.get('status_reason', {})
+                print(f'[DefAPI] Task failed: {reason}')
+                return None
+        except Exception as e:
+            print(f'[DefAPI] Poll #{attempt+1} error: {e}')
+    print('[DefAPI] Timeout: task did not complete in 60s')
     return None
 
 
