@@ -39,6 +39,7 @@ class DailyVote(Base):
     date = Column(Date, nullable=False)
     user_id = Column(Integer, nullable=False)
     username = Column(String, nullable=False)
+    display_name = Column(String, nullable=True)  # имя + фамилия из Telegram
     choice = Column(Integer, nullable=False)  # 0,1,2 — индексы вариантов
 
 
@@ -134,6 +135,12 @@ def get_team_names_today(session):
     return names
 
 
+def get_display_names(session):
+    """Словарь {username: display_name} для сегодняшних голосов."""
+    votes = session.query(DailyVote).filter(DailyVote.date == today()).all()
+    return {v.username: v.display_name for v in votes if v.display_name}
+
+
 # ─── Авто-poll каждый четверг в 9:00 ────────────────────────────────────────
 
 def send_thursday_poll():
@@ -165,6 +172,9 @@ def handle_poll_answer(poll_answer):
     user = poll_answer.user
     uid = user.id
     uname = user.username or user.first_name or str(uid)
+    # Собираем реальное имя из профиля Telegram
+    name_parts = [user.first_name or '', user.last_name or '']
+    display_name = ' '.join(p for p in name_parts if p).strip() or None
     option_ids = poll_answer.option_ids
     if not option_ids:
         return  # голос отозван
@@ -176,7 +186,10 @@ def handle_poll_answer(poll_answer):
         session.query(DailyVote).filter(
             DailyVote.date == today(), DailyVote.user_id == uid
         ).delete()
-        session.add(DailyVote(date=today(), user_id=uid, username=uname, choice=choice))
+        session.add(DailyVote(
+            date=today(), user_id=uid, username=uname,
+            display_name=display_name, choice=choice,
+        ))
         session.commit()
     finally:
         session.close()
@@ -218,7 +231,8 @@ def cmd_players(msg):
         lines = []
         for p in players:
             label = 'абонемент' if p.choice == 0 else 'разовая'
-            lines.append(f'@{p.username} ({label})')
+            name = f'{p.display_name} ' if p.display_name else ''
+            lines.append(f'{name}@{p.username} ({label})')
         bot.reply_to(msg, f'Игроки на сегодня ({len(lines)}):\n' + '\n'.join(lines))
     finally:
         session.close()
@@ -347,6 +361,7 @@ def cmd_teams(msg):
         if not teams:
             bot.reply_to(msg, 'Команды на сегодня не сформированы.')
             return
+        dn = get_display_names(session)
         # Группируем по номеру
         from collections import defaultdict
         grouped = defaultdict(list)
@@ -357,8 +372,11 @@ def cmd_teams(msg):
         lines = []
         for num in sorted(grouped.keys()):
             name = team_names_map.get(num, f'Команда {num}')
-            players = ', '.join(f'@{u}' for u in grouped[num])
-            lines.append(f'#{num} «{name}»: {players}')
+            parts = []
+            for u in grouped[num]:
+                real = dn.get(u)
+                parts.append(f'{real} @{u}' if real else f'@{u}')
+            lines.append(f'#{num} «{name}»: {", ".join(parts)}')
         bot.reply_to(msg, 'Составы на сегодня:\n' + '\n'.join(lines))
     finally:
         session.close()
@@ -587,14 +605,17 @@ def cmd_stats(msg):
         lines = [f'Статистика за {month}\n']
 
         # Игроки
+        dn = get_display_names(session)
         players = session.query(PlayerStat).filter(
             PlayerStat.month == month
         ).order_by(PlayerStat.goals.desc()).all()
         if players:
             lines.append('Игроки:')
             for p in players:
+                real = dn.get(p.username)
+                label = f'{real} @{p.username}' if real else f'@{p.username}'
                 lines.append(
-                    f'  @{p.username}: {p.goals} гол., '
+                    f'  {label}: {p.goals} гол., '
                     f'{p.matches} матч., {p.wins} побед'
                 )
 
@@ -673,8 +694,13 @@ def cmd_mvp(msg):
         if not teams:
             bot.reply_to(msg, 'Нет игроков в командах на сегодня.')
             return
+        dn = get_display_names(session)
         usernames = list(set(t.player_username for t in teams))
-        options = [f'@{u}' for u in usernames] + ['Никто']
+        options = []
+        for u in usernames:
+            real = dn.get(u)
+            options.append(f'{real} @{u}' if real else f'@{u}')
+        options.append('Никто')
         bot.send_poll(
             chat_id=msg.chat.id,
             question='MVP дня?',
