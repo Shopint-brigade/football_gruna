@@ -26,7 +26,7 @@ ADMIN_IDS = [int(x) for x in os.environ.get('ADMIN_IDS', '123456789').split(',')
 DEFAPI_KEY = os.environ.get('DEFAPI_KEY', '')  # ключ DefAPI для генерации картинок
 TZ = pytz.timezone('Europe/Moscow')
 
-DEFAULT_TEAM_NAMES = ['Красные', 'Синие', 'Зелёные', 'Жёлтые', 'Белые', 'Чёрные']
+DEFAULT_TEAM_NAMES = ['Красные', 'Зелёные', 'Синие', 'Жёлтые', 'Белые', 'Чёрные']
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
