@@ -93,6 +93,19 @@ class TeamStat(Base):
 
 Base.metadata.create_all(engine)
 
+# ─── Миграции (добавление новых колонок) ────────────────────────────────────
+
+with engine.connect() as _conn:
+    try:
+        _conn.execute(
+            __import__('sqlalchemy').text(
+                "ALTER TABLE daily_votes ADD COLUMN display_name VARCHAR"
+            )
+        )
+        _conn.commit()
+    except Exception:
+        _conn.rollback()  # колонка уже существует — ничего не делаем
+
 # ─── Состояния для /record ───────────────────────────────────────────────────
 
 user_states = {}  # {user_id: {'step': 1, 'team_a': ..., 'team_b': ..., ...}}
