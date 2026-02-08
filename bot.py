@@ -955,7 +955,7 @@ def _defapi_generate_image(prompt):
                     return result
                 if isinstance(result, list) and result:
                     item = result[0]
-                    return item if isinstance(item, str) else item.get('url')
+                    return item if isinstance(item, str) else (item.get('url') or item.get('image'))
                 if isinstance(result, dict):
                     return result.get('url') or result.get('image')
                 return None
