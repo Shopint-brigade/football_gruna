@@ -624,24 +624,9 @@ def _update_team_stats(session, state, month):
 def _build_stats_text(session):
     """Собирает текст статистики за текущий месяц."""
     month = current_month()
+    dn = get_display_names(session)
     lines = [f'Статистика за {month}']
     lines.append('━' * 24)
-
-    # Игроки
-    dn = get_display_names(session)
-    players = session.query(PlayerStat).filter(
-        PlayerStat.month == month
-    ).order_by(PlayerStat.goals.desc()).all()
-    if players:
-        lines.append('')
-        lines.append('Игроки:')
-        for i, p in enumerate(players, 1):
-            real = dn.get(p.username)
-            name = f'{real} (@{p.username})' if real else f'@{p.username}'
-            lines.append(
-                f'  {i}. {name}\n'
-                f'      {p.goals} гол. | {p.matches} матч. | {p.wins} побед'
-            )
 
     # Команды
     teams = session.query(TeamStat).filter(
@@ -667,6 +652,21 @@ def _build_stats_text(session):
             na = team_names.get(m.team_a_num, f'Команда {m.team_a_num}')
             nb = team_names.get(m.team_b_num, f'Команда {m.team_b_num}')
             lines.append(f'  {na}  {m.score_a} : {m.score_b}  {nb}')
+
+    # Игроки
+    players = session.query(PlayerStat).filter(
+        PlayerStat.month == month
+    ).order_by(PlayerStat.goals.desc()).all()
+    if players:
+        lines.append('')
+        lines.append('Игроки:')
+        for i, p in enumerate(players, 1):
+            real = dn.get(p.username)
+            name = f'{real} (@{p.username})' if real else f'@{p.username}'
+            lines.append(
+                f'  {i}. {name}\n'
+                f'      {p.goals} гол. | {p.matches} матч. | {p.wins} побед'
+            )
 
     return '\n'.join(lines) if len(lines) > 2 else None
 
