@@ -771,7 +771,12 @@ def _build_day_stats_text(session):
                 day_points[na]['points'] += 1
                 day_points[nb]['points'] += 1
 
-        sorted_teams = sorted(day_points.items(), key=lambda x: x[1]['points'], reverse=True)
+            sorted_teams = sorted(day_points.items(), key=lambda x: (
+                x[1]['points'],
+                x[1]['goals_scored'],
+                -x[1]['goals_conceded']
+            ), reverse=True)
+
         lines.append('')
         lines.append('Таблица дня:')
         for tname, data in sorted_teams:
@@ -800,7 +805,18 @@ def _build_day_stats_text(session):
                 totals[g.player_username] += g.goals_count
             lines.append('')
             lines.append('Бомбардиры дня:')
-            for uname, cnt in totals.most_common():
+            # Sort: most goals first, then by wins (from player_stats)
+            month = current_month()
+            wins_map = {}
+            for uname in totals:
+                ps = session.query(PlayerStat).filter(
+                    PlayerStat.username == uname,
+                    PlayerStat.month == month
+                ).first()
+                wins_map[uname] = ps.wins if ps else 0
+            sorted_scorers = sorted(totals.items(), key=lambda x: (x[1], wins_map.get(x[0], 0)), reverse=True)
+            for uname, cnt in sorted_scorers:
+
                 real = dn.get(uname)
                 label = f'{real} (@{uname})' if real else f'@{uname}'
                 lines.append(f'  {label}: {cnt} гол.')
@@ -841,7 +857,8 @@ def _build_month_stats_text(session):
     # Команды
     teams = session.query(TeamStat).filter(
         TeamStat.month == month
-    ).order_by(TeamStat.points.desc()).all()
+    ).all()
+    teams.sort(key=lambda t: (t.points, t.goals_scored, -t.goals_conceded), reverse=True)
     if teams:
         lines.append('')
         lines.append('Команды:')
@@ -854,8 +871,10 @@ def _build_month_stats_text(session):
 
     # Игроки
     players = session.query(PlayerStat).filter(
-        PlayerStat.month == month
-    ).order_by(PlayerStat.goals.desc()).all()
+        PlayerStat.month == month,
+        PlayerStat.goals > 0
+    ).all()
+    players.sort(key=lambda p: (p.goals, p.wins), reverse=True)
     if players:
         lines.append('')
         lines.append('Игроки:')
