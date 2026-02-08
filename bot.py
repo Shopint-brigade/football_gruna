@@ -749,30 +749,38 @@ def _build_day_stats_text(session):
     lines = [f'Игровой день {today()}']
     lines.append('━' * 24)
 
-    # Составы
-    from collections import defaultdict
-    team_rows = session.query(TeamToday).filter(
-        TeamToday.date == today(),
-        TeamToday.player_username != '__placeholder__'
-    ).order_by(TeamToday.team_number).all()
-    if team_rows:
-        grouped = defaultdict(list)
-        tnames = {}
-        for t in team_rows:
-            grouped[t.team_number].append(t.player_username)
-            tnames[t.team_number] = t.team_name
+    # Матчи сегодня
+    today_matches = session.query(Match).filter(Match.date == today()).all()
+
+    # Таблица дня (очки)
+    if today_matches:
+        from collections import defaultdict
+        day_points = defaultdict(lambda: {'points': 0, 'goals_scored': 0, 'goals_conceded': 0})
+        for m in today_matches:
+            na = team_names.get(m.team_a_num, f'Команда {m.team_a_num}')
+            nb = team_names.get(m.team_b_num, f'Команда {m.team_b_num}')
+            day_points[na]['goals_scored'] += m.score_a
+            day_points[na]['goals_conceded'] += m.score_b
+            day_points[nb]['goals_scored'] += m.score_b
+            day_points[nb]['goals_conceded'] += m.score_a
+            if m.score_a > m.score_b:
+                day_points[na]['points'] += 3
+            elif m.score_a < m.score_b:
+                day_points[nb]['points'] += 3
+            else:
+                day_points[na]['points'] += 1
+                day_points[nb]['points'] += 1
+
+        sorted_teams = sorted(day_points.items(), key=lambda x: x[1]['points'], reverse=True)
         lines.append('')
-        lines.append('Составы:')
-        for num in sorted(grouped.keys()):
-            name = tnames.get(num, f'Команда {num}')
-            parts = []
-            for u in grouped[num]:
-                real = dn.get(u)
-                parts.append(f'{real} (@{u})' if real else f'@{u}')
-            lines.append(f'  {name}: {", ".join(parts)}')
+        lines.append('Таблица дня:')
+        for tname, data in sorted_teams:
+            lines.append(
+                f'  {tname}: {data["points"]} очк. | '
+                f'{data["goals_scored"]} заб. | {data["goals_conceded"]} проп.'
+            )
 
     # Матчи
-    today_matches = session.query(Match).filter(Match.date == today()).all()
     if today_matches:
         lines.append('')
         lines.append('Матчи:')
@@ -781,7 +789,7 @@ def _build_day_stats_text(session):
             nb = team_names.get(m.team_b_num, f'Команда {m.team_b_num}')
             lines.append(f'  {na}  {m.score_a} : {m.score_b}  {nb}')
 
-    # Голы дня
+    # Бомбардиры дня
     if today_matches:
         match_ids = [m.id for m in today_matches]
         goals = session.query(Goal).filter(Goal.match_id.in_(match_ids)).all()
@@ -797,7 +805,30 @@ def _build_day_stats_text(session):
                 label = f'{real} (@{uname})' if real else f'@{uname}'
                 lines.append(f'  {label}: {cnt} гол.')
 
+    # Составы (в конце)
+    team_rows = session.query(TeamToday).filter(
+        TeamToday.date == today(),
+        TeamToday.player_username != '__placeholder__'
+    ).order_by(TeamToday.team_number).all()
+    if team_rows:
+        from collections import defaultdict as dd
+        grouped = dd(list)
+        tnames = {}
+        for t in team_rows:
+            grouped[t.team_number].append(t.player_username)
+            tnames[t.team_number] = t.team_name
+        lines.append('')
+        lines.append('Составы:')
+        for num in sorted(grouped.keys()):
+            name = tnames.get(num, f'Команда {num}')
+            parts = []
+            for u in grouped[num]:
+                real = dn.get(u)
+                parts.append(f'{real} (@{u})' if real else f'@{u}')
+            lines.append(f'  {name}: {", ".join(parts)}')
+
     return '\n'.join(lines) if len(lines) > 2 else None
+
 
 
 def _build_month_stats_text(session):
