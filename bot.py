@@ -230,8 +230,11 @@ def cmd_help(msg):
         "/poll — отправить poll вручную\n"
         "/mvp — poll MVP дня\n\n"
         "Для всех:\n"
-        "/stats — статистика\n"
-        "/stats_img — статистика картинкой"
+        "/stats — вся статистика\n"
+        "/stats_day — статистика дня\n"
+        "/stats_month — статистика месяца\n"
+        "/stats_day_img — день картинкой\n"
+        "/stats_month_img — месяц картинкой"
     )
     bot.reply_to(msg, text)
 
@@ -621,8 +624,66 @@ def _update_team_stats(session, state, month):
 
 # ─── /stats ──────────────────────────────────────────────────────────────────
 
-def _build_stats_text(session):
-    """Собирает текст статистики за текущий месяц."""
+def _build_day_stats_text(session):
+    """Статистика за сегодняшний игровой день."""
+    dn = get_display_names(session)
+    team_names = get_team_names_today(session)
+    lines = [f'Игровой день {today()}']
+    lines.append('━' * 24)
+
+    # Составы
+    from collections import defaultdict
+    team_rows = session.query(TeamToday).filter(
+        TeamToday.date == today(),
+        TeamToday.player_username != '__placeholder__'
+    ).order_by(TeamToday.team_number).all()
+    if team_rows:
+        grouped = defaultdict(list)
+        tnames = {}
+        for t in team_rows:
+            grouped[t.team_number].append(t.player_username)
+            tnames[t.team_number] = t.team_name
+        lines.append('')
+        lines.append('Составы:')
+        for num in sorted(grouped.keys()):
+            name = tnames.get(num, f'Команда {num}')
+            parts = []
+            for u in grouped[num]:
+                real = dn.get(u)
+                parts.append(f'{real} (@{u})' if real else f'@{u}')
+            lines.append(f'  {name}: {", ".join(parts)}')
+
+    # Матчи
+    today_matches = session.query(Match).filter(Match.date == today()).all()
+    if today_matches:
+        lines.append('')
+        lines.append('Матчи:')
+        for m in today_matches:
+            na = team_names.get(m.team_a_num, f'Команда {m.team_a_num}')
+            nb = team_names.get(m.team_b_num, f'Команда {m.team_b_num}')
+            lines.append(f'  {na}  {m.score_a} : {m.score_b}  {nb}')
+
+    # Голы дня
+    if today_matches:
+        match_ids = [m.id for m in today_matches]
+        goals = session.query(Goal).filter(Goal.match_id.in_(match_ids)).all()
+        if goals:
+            from collections import Counter
+            totals = Counter()
+            for g in goals:
+                totals[g.player_username] += g.goals_count
+            lines.append('')
+            lines.append('Бомбардиры дня:')
+            for uname, cnt in totals.most_common():
+                real = dn.get(uname)
+                label = f'{real} (@{uname})' if real else f'@{uname}'
+                lines.append(f'  {label}: {cnt} гол.')
+
+    return '\n'.join(lines) if len(lines) > 2 else None
+
+
+def _build_month_stats_text(session):
+    """Статистика за текущий месяц."""
     month = current_month()
     dn = get_display_names(session)
     lines = [f'Статистика за {month}']
@@ -641,17 +702,6 @@ def _build_stats_text(session):
                 f'  {tname}: {t.points} очк. | '
                 f'{t.goals_scored} заб. | {t.goals_conceded} проп.'
             )
-
-    # Матчи за сегодня
-    today_matches = session.query(Match).filter(Match.date == today()).all()
-    if today_matches:
-        team_names = get_team_names_today(session)
-        lines.append('')
-        lines.append(f'Матчи ({today()}):')
-        for m in today_matches:
-            na = team_names.get(m.team_a_num, f'Команда {m.team_a_num}')
-            nb = team_names.get(m.team_b_num, f'Команда {m.team_b_num}')
-            lines.append(f'  {na}  {m.score_a} : {m.score_b}  {nb}')
 
     # Игроки
     players = session.query(PlayerStat).filter(
@@ -673,15 +723,38 @@ def _build_stats_text(session):
 
 @bot.message_handler(commands=['stats'])
 def cmd_stats(msg):
+    """Показывает и дневную, и месячную статистику."""
     session = Session()
     try:
-        text = _build_stats_text(session)
-        bot.reply_to(msg, text or 'Статистика пока пуста.')
+        day = _build_day_stats_text(session)
+        month = _build_month_stats_text(session)
+        parts = [p for p in [day, month] if p]
+        bot.reply_to(msg, '\n\n'.join(parts) if parts else 'Статистика пока пуста.')
     finally:
         session.close()
 
 
-# ─── /stats_img — статистика картинкой (Nano Banana Pro) ─────────────────────
+@bot.message_handler(commands=['stats_day'])
+def cmd_stats_day(msg):
+    session = Session()
+    try:
+        text = _build_day_stats_text(session)
+        bot.reply_to(msg, text or 'Сегодня матчей ещё не было.')
+    finally:
+        session.close()
+
+
+@bot.message_handler(commands=['stats_month'])
+def cmd_stats_month(msg):
+    session = Session()
+    try:
+        text = _build_month_stats_text(session)
+        bot.reply_to(msg, text or 'Статистика за месяц пока пуста.')
+    finally:
+        session.close()
+
+
+# ─── Генерация картинок (Nano Banana Pro через DefAPI) ───────────────────────
 
 def _defapi_generate_image(prompt):
     """Отправляет запрос в DefAPI и возвращает URL картинки или None."""
@@ -692,7 +765,6 @@ def _defapi_generate_image(prompt):
         'Accept': 'application/json',
         'Content-Type': 'application/json',
     }
-    # Создаём задачу
     resp = requests.post(
         'https://api.defapi.org/api/image/gen',
         headers=headers,
@@ -704,7 +776,6 @@ def _defapi_generate_image(prompt):
         return None
     task_id = data['data']['task_id']
 
-    # Ждём результат (макс. ~60 сек)
     for _ in range(20):
         time.sleep(3)
         r = requests.get(
@@ -719,7 +790,6 @@ def _defapi_generate_image(prompt):
             result = task_data.get('result')
             if not result:
                 return None
-            # result может быть строкой (URL), списком URL-ов, или объектом
             if isinstance(result, str):
                 return result
             if isinstance(result, list) and result:
@@ -733,18 +803,13 @@ def _defapi_generate_image(prompt):
     return None
 
 
-@bot.message_handler(commands=['stats_img'])
-def cmd_stats_img(msg):
+def _send_stats_image(msg, stats_text, caption):
+    """Генерирует картинку из текста статистики и отправляет в чат."""
     if not DEFAPI_KEY:
         bot.reply_to(msg, 'DEFAPI_KEY не настроен.')
         return
-    session = Session()
-    try:
-        stats_text = _build_stats_text(session)
-    finally:
-        session.close()
     if not stats_text:
-        bot.reply_to(msg, 'Статистика пока пуста.')
+        bot.reply_to(msg, 'Нет данных для генерации.')
         return
 
     bot.reply_to(msg, 'Генерирую картинку...')
@@ -766,9 +831,29 @@ def cmd_stats_img(msg):
     try:
         img_resp = requests.get(image_url, timeout=30)
         img_resp.raise_for_status()
-        bot.send_photo(msg.chat.id, io.BytesIO(img_resp.content), caption=f'Статистика за {current_month()}')
+        bot.send_photo(msg.chat.id, io.BytesIO(img_resp.content), caption=caption)
     except Exception:
         bot.reply_to(msg, 'Не удалось загрузить картинку.')
+
+
+@bot.message_handler(commands=['stats_day_img'])
+def cmd_stats_day_img(msg):
+    session = Session()
+    try:
+        text = _build_day_stats_text(session)
+    finally:
+        session.close()
+    _send_stats_image(msg, text, f'Игровой день {today()}')
+
+
+@bot.message_handler(commands=['stats_month_img'])
+def cmd_stats_month_img(msg):
+    session = Session()
+    try:
+        text = _build_month_stats_text(session)
+    finally:
+        session.close()
+    _send_stats_image(msg, text, f'Статистика за {current_month()}')
 
 
 # ─── /reset_month ────────────────────────────────────────────────────────────
