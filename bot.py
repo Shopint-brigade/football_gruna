@@ -264,6 +264,12 @@ def cmd_clear_today(msg):
     try:
         session.query(DailyVote).filter(DailyVote.date == today()).delete()
         session.query(TeamToday).filter(TeamToday.date == today()).delete()
+        # Удаляем голы перед матчами (FK goals.match_id → matches.id)
+        today_match_ids = [
+            m.id for m in session.query(Match.id).filter(Match.date == today()).all()
+        ]
+        if today_match_ids:
+            session.query(Goal).filter(Goal.match_id.in_(today_match_ids)).delete()
         session.query(Match).filter(Match.date == today()).delete()
         session.commit()
         bot.reply_to(msg, 'Данные сегодняшнего дня очищены.')
