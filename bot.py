@@ -228,13 +228,13 @@ def cmd_help(msg):
         "/record — записать матч\n"
         "/reset_month — обнулить статистику месяца\n"
         "/poll — отправить poll вручную\n"
-        "/mvp — poll MVP дня\n\n"
+        "/mvp — poll MVP дня\n"
+        "/stats_day_img — день картинкой\n"
+        "/stats_month_img — месяц картинкой\n\n"
         "Для всех:\n"
         "/stats — вся статистика\n"
         "/stats_day — статистика дня\n"
         "/stats_month — статистика месяца\n"
-        "/stats_day_img — день картинкой\n"
-        "/stats_month_img — месяц картинкой"
     )
     bot.reply_to(msg, text)
 
