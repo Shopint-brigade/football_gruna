@@ -1034,6 +1034,8 @@ def _send_stats_image(msg, stats_text, caption):
 
 @bot.message_handler(commands=['stats_day_img'])
 def cmd_stats_day_img(msg):
+    if not is_admin(msg.from_user.id):
+        return
     session = Session()
     try:
         text = _build_day_stats_text(session)
@@ -1044,6 +1046,8 @@ def cmd_stats_day_img(msg):
 
 @bot.message_handler(commands=['stats_month_img'])
 def cmd_stats_month_img(msg):
+    if not is_admin(msg.from_user.id):
+        return
     session = Session()
     try:
         text = _build_month_stats_text(session)
