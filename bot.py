@@ -567,9 +567,7 @@ def cmd_record(msg):
     bot.reply_to(msg, 'Шаг 1: Выбери команду A:', reply_markup=markup)
 
 
-@bot.message_handler(func=lambda m: m.from_user.id in user_states
-                     and user_states[m.from_user.id].get('mode') == 'record'
-                     and not m.text.startswith('/'))
+
 
 
 
@@ -1060,7 +1058,11 @@ def cmd_mvp(msg):
         )
     finally:
         session.close()
-
+        
+@bot.message_handler(func=lambda m: m.from_user.id in user_states
+                     and user_states[m.from_user.id].get('mode') == 'record'
+                     and m.text is not None
+                     and not m.text.startswith('/'))
 
 def handle_record_steps(msg):
 
