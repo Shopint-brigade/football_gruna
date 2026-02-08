@@ -177,7 +177,7 @@ def send_thursday_poll():
 
 
 scheduler = BackgroundScheduler(timezone=TZ)
-scheduler.add_job(send_thursday_poll, 'cron', day_of_week='thu', hour=9, minute=0)
+scheduler.add_job(send_thursday_poll, 'cron', day_of_week='thu', hour=10, minute=0)
 scheduler.start()
 
 # ─── Обработка ответов на poll ───────────────────────────────────────────────
