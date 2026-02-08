@@ -427,12 +427,16 @@ def cmd_record(msg):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for num in sorted(names.keys()):
         markup.add(f'{num}. {names[num]}')
-    user_states[msg.from_user.id] = {'step': 1, 'teams': names}
+    user_states[msg.from_user.id] = {'mode': 'record', 'step': 1, 'teams': names}
+
     bot.reply_to(msg, 'Шаг 1: Выбери команду A:', reply_markup=markup)
 
 
-@bot.message_handler(func=lambda m: m.from_user.id in user_states)
+@bot.message_handler(func=lambda m: m.from_user.id in user_states
+                     and user_states[m.from_user.id].get('mode') == 'record'
+                     and not m.text.startswith('/'))
 def handle_record_steps(msg):
+
     uid = msg.from_user.id
     state = user_states[uid]
     text = msg.text.strip()
