@@ -8,7 +8,7 @@ import datetime
 import requests
 import telebot
 from telebot import types
-from sqlalchemy import create_engine, Column, Integer, String, Date, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Date, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker
 from apscheduler.schedulers.background import BackgroundScheduler
 import pytz
@@ -41,7 +41,7 @@ class DailyVote(Base):
     __tablename__ = 'daily_votes'
     id = Column(Integer, primary_key=True, autoincrement=True)
     date = Column(Date, nullable=False)
-    user_id = Column(Integer, nullable=False)
+    user_id = Column(BigInteger, nullable=False)
     username = Column(String, nullable=False)
     display_name = Column(String, nullable=True)  # имя + фамилия из Telegram
     choice = Column(Integer, nullable=False)  # 0,1,2 — индексы вариантов
@@ -109,6 +109,17 @@ with engine.connect() as _conn:
         _conn.commit()
     except Exception:
         _conn.rollback()  # колонка уже существует — ничего не делаем
+
+    # Миграция: user_id INTEGER → BIGINT (Telegram ID-шники могут превышать 2^31)
+    try:
+        _conn.execute(
+            __import__('sqlalchemy').text(
+                "ALTER TABLE daily_votes ALTER COLUMN user_id TYPE BIGINT"
+            )
+        )
+        _conn.commit()
+    except Exception:
+        _conn.rollback()  # уже BIGINT — ничего не делаем
 
 # ─── Состояния для /record ───────────────────────────────────────────────────
 
