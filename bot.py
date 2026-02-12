@@ -196,7 +196,7 @@ scheduler.start()
 
 @bot.poll_answer_handler()
 def handle_poll_answer(poll_answer):
-    """Сохраняем голос пользователя."""
+    """Сохраняем голос пользователя (с ретраями при ошибке)."""
     user = poll_answer.user
     uid = user.id
     uname = user.username or user.first_name or str(uid)
@@ -208,19 +208,27 @@ def handle_poll_answer(poll_answer):
         return  # голос отозван
     choice = option_ids[0]
 
-    session = Session()
-    try:
-        # Удаляем старый голос за сегодня, если есть
-        session.query(DailyVote).filter(
-            DailyVote.date == today(), DailyVote.user_id == uid
-        ).delete()
-        session.add(DailyVote(
-            date=today(), user_id=uid, username=uname,
-            display_name=display_name, choice=choice,
-        ))
-        session.commit()
-    finally:
-        session.close()
+    for attempt in range(3):
+        session = Session()
+        try:
+            # Удаляем старый голос за сегодня, если есть
+            session.query(DailyVote).filter(
+                DailyVote.date == today(), DailyVote.user_id == uid
+            ).delete()
+            session.add(DailyVote(
+                date=today(), user_id=uid, username=uname,
+                display_name=display_name, choice=choice,
+            ))
+            session.commit()
+            return  # успех — выходим
+        except Exception as e:
+            session.rollback()
+            print(f'[PollAnswer] Attempt {attempt+1} failed for uid={uid}: {e}')
+            if attempt < 2:
+                time.sleep(1)
+        finally:
+            session.close()
+    print(f'[PollAnswer] FAILED to save vote for uid={uid} uname={uname} after 3 attempts')
 
 
 # ─── Команды бота ────────────────────────────────────────────────────────────
@@ -231,6 +239,7 @@ def cmd_help(msg):
         "Бот для организации игр\n\n"
         "Команды админа:\n"
         "/players — игроки на сегодня\n"
+        "/add_player Имя — вручную добавить игрока\n"
         "/clear_today — очистить данные дня\n"
         "/set_teams N — задать кол-во команд (2–6)\n"
         "/set_team_name N Имя — название команды\n"
@@ -266,6 +275,46 @@ def cmd_players(msg):
             name = f'{p.display_name} ' if p.display_name else ''
             lines.append(f'{name}@{p.username} ({label})')
         bot.reply_to(msg, f'Игроки на сегодня ({len(lines)}):\n' + '\n'.join(lines))
+    finally:
+        session.close()
+
+
+@bot.message_handler(commands=['add_player'])
+def cmd_add_player(msg):
+    """Вручную добавить игрока в список на сегодня (если голос потерялся)."""
+    if not is_admin(msg.from_user.id):
+        return
+    parts = msg.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(msg, 'Формат: /add_player Имя Фамилия\nИли: /add_player @username Имя Фамилия')
+        return
+    raw = parts[1].strip()
+    # Парсим: либо "@username Имя Фамилия", либо просто "Имя Фамилия"
+    tokens = raw.split()
+    if tokens[0].startswith('@'):
+        uname = tokens[0].lstrip('@')
+        display_name = ' '.join(tokens[1:]) if len(tokens) > 1 else None
+    else:
+        # Нет username — используем имя как username (транслит/как есть)
+        display_name = raw
+        uname = raw.replace(' ', '_').lower()
+    session = Session()
+    try:
+        # Проверяем, не дублируется ли
+        existing = session.query(DailyVote).filter(
+            DailyVote.date == today(),
+            DailyVote.username == uname
+        ).first()
+        if existing:
+            bot.reply_to(msg, f'@{uname} уже в списке на сегодня.')
+            return
+        session.add(DailyVote(
+            date=today(), user_id=0, username=uname,
+            display_name=display_name, choice=0,
+        ))
+        session.commit()
+        label = f'{display_name} (@{uname})' if display_name else f'@{uname}'
+        bot.reply_to(msg, f'{label} добавлен в список на сегодня.')
     finally:
         session.close()
 
