@@ -240,6 +240,8 @@ def cmd_help(msg):
         "Команды админа:\n"
         "/players — игроки на сегодня\n"
         "/add_player Имя — вручную добавить игрока\n"
+        "/edit_player @user Имя — изменить имя игрока\n"
+        "/remove_player @user — убрать игрока\n"
         "/clear_today — очистить данные дня\n"
         "/set_teams N — задать кол-во команд (2–6)\n"
         "/set_team_name N Имя — название команды\n"
@@ -315,6 +317,67 @@ def cmd_add_player(msg):
         session.commit()
         label = f'{display_name} (@{uname})' if display_name else f'@{uname}'
         bot.reply_to(msg, f'{label} добавлен в список на сегодня.')
+    finally:
+        session.close()
+
+
+@bot.message_handler(commands=['edit_player'])
+def cmd_edit_player(msg):
+    """Изменить имя игрока. Формат: /edit_player @username Новое Имя"""
+    if not is_admin(msg.from_user.id):
+        return
+    parts = msg.text.split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].startswith('@'):
+        bot.reply_to(msg, 'Формат: /edit_player @username Новое Имя')
+        return
+    uname = parts[1].lstrip('@')
+    new_display = parts[2].strip()
+    session = Session()
+    try:
+        vote = session.query(DailyVote).filter(
+            DailyVote.date == today(),
+            DailyVote.username == uname
+        ).first()
+        if not vote:
+            bot.reply_to(msg, f'@{uname} нет в списке на сегодня.')
+            return
+        old_display = vote.display_name or '(не задано)'
+        vote.display_name = new_display
+        session.commit()
+        bot.reply_to(msg, f'@{uname}: «{old_display}» → «{new_display}»')
+    finally:
+        session.close()
+
+
+@bot.message_handler(commands=['remove_player'])
+def cmd_remove_player(msg):
+    """Убрать игрока из списка на сегодня. Формат: /remove_player @username"""
+    if not is_admin(msg.from_user.id):
+        return
+    parts = msg.text.split()
+    if len(parts) < 2:
+        bot.reply_to(msg, 'Формат: /remove_player @username')
+        return
+    uname = parts[1].lstrip('@')
+    session = Session()
+    try:
+        vote = session.query(DailyVote).filter(
+            DailyVote.date == today(),
+            DailyVote.username == uname
+        ).first()
+        if not vote:
+            bot.reply_to(msg, f'@{uname} нет в списке на сегодня.')
+            return
+        dn = vote.display_name
+        label = f'{dn} (@{uname})' if dn else f'@{uname}'
+        # Убираем из команды, если был назначен
+        session.query(TeamToday).filter(
+            TeamToday.date == today(),
+            TeamToday.player_username == uname
+        ).delete()
+        session.delete(vote)
+        session.commit()
+        bot.reply_to(msg, f'{label} убран из списка на сегодня.')
     finally:
         session.close()
 
