@@ -204,17 +204,37 @@ def handle_poll_answer(poll_answer):
     name_parts = [user.first_name or '', user.last_name or '']
     display_name = ' '.join(p for p in name_parts if p).strip() or None
     option_ids = poll_answer.option_ids
-    if not option_ids:
-        return  # голос отозван
-    choice = option_ids[0]
 
     for attempt in range(3):
         session = Session()
         try:
+            if not option_ids:
+                # Голос отозван — удаляем из списка и из команды
+                vote = session.query(DailyVote).filter(
+                    DailyVote.date == today(), DailyVote.user_id == uid
+                ).first()
+                if vote:
+                    session.query(TeamToday).filter(
+                        TeamToday.date == today(),
+                        TeamToday.player_username == vote.username
+                    ).delete()
+                    session.delete(vote)
+                session.commit()
+                return
+
+            choice = option_ids[0]
             # Удаляем старый голос за сегодня, если есть
-            session.query(DailyVote).filter(
+            old_vote = session.query(DailyVote).filter(
                 DailyVote.date == today(), DailyVote.user_id == uid
-            ).delete()
+            ).first()
+            if old_vote:
+                # Если меняет на «не играю» (1) — убираем из команды тоже
+                if choice == 1:
+                    session.query(TeamToday).filter(
+                        TeamToday.date == today(),
+                        TeamToday.player_username == old_vote.username
+                    ).delete()
+                session.delete(old_vote)
             session.add(DailyVote(
                 date=today(), user_id=uid, username=uname,
                 display_name=display_name, choice=choice,
