@@ -1243,19 +1243,39 @@ def cmd_mvp(msg):
         return
     session = Session()
     try:
-        teams = session.query(TeamToday).filter(
-            TeamToday.date == today(),
-            TeamToday.player_username != '__placeholder__'
-        ).all()
-        if not teams:
-            bot.reply_to(msg, 'Нет игроков в командах на сегодня.')
+        # Берём сегодняшних бомбардиров (кто забил хотя бы 1 гол)
+        today_matches = session.query(Match).filter(Match.date == today()).all()
+        if not today_matches:
+            bot.reply_to(msg, 'Сегодня матчей ещё не было.')
             return
+        match_ids = [m.id for m in today_matches]
+        goals = session.query(Goal).filter(Goal.match_id.in_(match_ids)).all()
         dn = get_display_names(session)
-        usernames = list(set(t.player_username for t in teams))
-        options = []
-        for u in usernames:
-            real = dn.get(u)
-            options.append(f'{real} @{u}' if real else f'@{u}')
+
+        if goals:
+            from collections import Counter
+            totals = Counter()
+            for g in goals:
+                totals[g.player_username] += g.goals_count
+            # Сортируем по голам, берём топ-9 (+ «Никто» = 10)
+            sorted_scorers = totals.most_common(9)
+            options = []
+            for uname, cnt in sorted_scorers:
+                real = dn.get(uname)
+                label = f'{real} ({cnt} гол.)' if real else f'@{uname} ({cnt} гол.)'
+                options.append(label)
+        else:
+            # Голов не было — берём всех игроков из команд (до 9)
+            teams = session.query(TeamToday).filter(
+                TeamToday.date == today(),
+                TeamToday.player_username != '__placeholder__'
+            ).all()
+            usernames = list(set(t.player_username for t in teams))[:9]
+            options = []
+            for u in usernames:
+                real = dn.get(u)
+                options.append(f'{real}' if real else f'@{u}')
+
         options.append('Никто')
         bot.send_poll(
             chat_id=msg.chat.id,
