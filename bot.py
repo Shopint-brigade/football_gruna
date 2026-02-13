@@ -282,7 +282,7 @@ def cmd_help(msg):
         "/record — записать матч\n"
         "/add_goals — добавить голы к матчу\n"
         "/remove_goals — удалить голы из матча\n"
-        "/adjust_goals @user ±N — корректировка голов\n"
+        "/adjust_stats @user — корректировка статистики\n"
         "/auto_teams N — авто-распределение по рейтингу\n"
         "/reset_month — обнулить статистику месяца\n"
         "/poll — отправить poll вручную\n"
@@ -1122,29 +1122,40 @@ def handle_remove_goals_callback(call):
         bot.send_message(call.message.chat.id, 'Готово.')
 
 
-# ─── /adjust_goals — корректировка голов в статистике месяца ──────────────────
+# ─── /adjust_stats — корректировка статистики игрока ──────────────────────────
 
-@bot.message_handler(commands=['adjust_goals'])
-def cmd_adjust_goals(msg):
-    """Корректировка голов игрока в месячной статистике.
-    /adjust_goals @username +3   — добавить 3 гола
-    /adjust_goals @username -2   — убрать 2 гола
-    /adjust_goals @username 5    — установить ровно 5 голов
+ADJUSTABLE_FIELDS = {
+    'goals': ('goals', 'голы'),
+    'matches': ('matches', 'матчи'),
+    'wins': ('wins', 'победы'),
+    'points': ('player_points', 'очки'),
+}
+
+
+@bot.message_handler(commands=['adjust_stats'])
+def cmd_adjust_stats(msg):
+    """Корректировка статистики игрока за текущий месяц.
+    /adjust_stats @username                — показать текущие значения
+    /adjust_stats @username goals +3       — добавить
+    /adjust_stats @username wins -1        — убрать
+    /adjust_stats @username matches 10     — установить
+    Поля: goals, matches, wins, points
     """
     if not is_admin(msg.from_user.id):
         return
     parts = msg.text.split()
-    if len(parts) < 3:
+    if len(parts) < 2:
+        fields = ', '.join(ADJUSTABLE_FIELDS.keys())
         bot.reply_to(
             msg,
             'Формат:\n'
-            '/adjust_goals @username +3 — добавить\n'
-            '/adjust_goals @username -2 — убрать\n'
-            '/adjust_goals @username 5 — установить'
+            f'/adjust_stats @user — показать стат\n'
+            f'/adjust_stats @user <поле> <значение>\n'
+            f'Поля: {fields}\n'
+            f'Значение: 5 (установить), +3 (добавить), -2 (убрать)'
         )
         return
     uname = parts[1].lstrip('@')
-    val_str = parts[2]
     session = Session()
     try:
         month = current_month()
@@ -1155,25 +1166,57 @@ def cmd_adjust_goals(msg):
         real = dn.get(uname)
         label = f'{real} (@{uname})' if real else f'@{uname}'
 
+        # Если только username — показываем текущие значения
+        if len(parts) == 2:
+            if not stat:
+                bot.reply_to(msg, f'{label}: нет статистики за {month}.')
+                return
+            mdw = _compute_match_day_wins(session, month)
+            dw = mdw.get(uname, 0)
+            rating = stat.player_points + stat.goals + dw
+            bot.reply_to(
+                msg,
+                f'{label} ({month}):\n'
+                f'  Рейтинг: {rating}\n'
+                f'  goals: {stat.goals}\n'
+                f'  matches: {stat.matches}\n'
+                f'  wins: {stat.wins}\n'
+                f'  points: {stat.player_points}\n'
+                f'  дн.поб. (авто): {dw}'
+            )
+            return
+
+        if len(parts) < 4:
+            bot.reply_to(msg, 'Формат: /adjust_stats @user <поле> <значение>')
+            return
+
+        field_key = parts[2].lower()
+        val_str = parts[3]
+
+        if field_key not in ADJUSTABLE_FIELDS:
+            fields = ', '.join(ADJUSTABLE_FIELDS.keys())
+            bot.reply_to(msg, f'Неизвестное поле. Доступные: {fields}')
+            return
+
+        attr_name, field_label = ADJUSTABLE_FIELDS[field_key]
+
         if not stat:
-            # Создаём запись если нет
             stat = PlayerStat(username=uname, month=month, goals=0, matches=0, wins=0, player_points=0)
             session.add(stat)
 
-        old_goals = stat.goals
+        old_val = getattr(stat, attr_name)
         if val_str.startswith('+'):
-            delta = int(val_str[1:])
-            stat.goals += delta
+            new_val = old_val + int(val_str[1:])
         elif val_str.startswith('-'):
-            delta = int(val_str[1:])
-            stat.goals = max(0, stat.goals - delta)
+            new_val = max(0, old_val - int(val_str[1:]))
         else:
-            stat.goals = max(0, int(val_str))
+            new_val = max(0, int(val_str))
 
+        setattr(stat, attr_name, new_val)
         session.commit()
-        bot.reply_to(msg, f'{label}: голы {old_goals} → {stat.goals} (месяц {month})')
+        bot.reply_to(msg, f'{label}: {field_label} {old_val} → {new_val} ({month})')
     except ValueError:
-        bot.reply_to(msg, 'Некорректное число. Формат: /adjust_goals @username +3')
+        bot.reply_to(msg, 'Некорректное число.')
     finally:
         session.close()
 
@@ -1278,7 +1321,7 @@ def cmd_rating(msg):
             name = f'{real} (@{uname})' if real else f'@{uname}'
             lines.append(
                 f'  {i}. {name}\n'
-                f'      Рейтинг: {rating} | {pts} очк. | {goals} гол. | {mdw} дн.поб. | {matches} матч. | {wins} побед'
+                f'      Рейтинг: {rating} | {goals} гол. | {mdw} дн.поб. | {matches} матч. | {wins} побед'
             )
         bot.reply_to(msg, '\n'.join(lines))
     finally:
