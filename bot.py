@@ -1180,16 +1180,84 @@ def cmd_adjust_goals(msg):
 
 # ─── /rating — рейтинг игроков ────────────────────────────────────────────────
 
+def _compute_match_day_wins(session, month):
+    """Подсчитывает сколько раз команда игрока заняла 1-е место в дневной таблице.
+    Возвращает {username: count}."""
+    from collections import defaultdict
+    # Все матчи за месяц
+    matches = session.query(Match).filter(Match.month == month).all()
+    if not matches:
+        return {}
+    # Группируем матчи по дате
+    by_date = defaultdict(list)
+    for m in matches:
+        by_date[m.date].append(m)
+
+    day_wins = defaultdict(int)  # username → кол-во дней на 1 месте
+
+    for match_date, day_matches in by_date.items():
+        # Считаем очки команд за этот день
+        team_points = defaultdict(int)
+        team_gf = defaultdict(int)  # goals for
+        team_ga = defaultdict(int)  # goals against
+        for m in day_matches:
+            if m.score_a > m.score_b:
+                team_points[m.team_a_num] += 3
+            elif m.score_a < m.score_b:
+                team_points[m.team_b_num] += 3
+            else:
+                team_points[m.team_a_num] += 1
+                team_points[m.team_b_num] += 1
+            team_gf[m.team_a_num] += m.score_a
+            team_ga[m.team_a_num] += m.score_b
+            team_gf[m.team_b_num] += m.score_b
+            team_ga[m.team_b_num] += m.score_a
+
+        if not team_points:
+            continue
+
+        # Находим максимум очков
+        sorted_teams = sorted(
+            team_points.keys(),
+            key=lambda t: (team_points[t], team_gf[t], -team_ga[t]),
+            reverse=True
+        )
+        best_pts = team_points[sorted_teams[0]]
+        best_gf = team_gf[sorted_teams[0]]
+        best_ga = team_ga[sorted_teams[0]]
+
+        # Команды на 1-м месте (может быть несколько при равных очках)
+        winning_teams = [
+            t for t in sorted_teams
+            if team_points[t] == best_pts
+            and team_gf[t] == best_gf
+            and team_ga[t] == best_ga
+        ]
+
+        # Игроки этих команд на эту дату
+        team_players = session.query(TeamToday).filter(
+            TeamToday.date == match_date,
+            TeamToday.team_number.in_(winning_teams),
+            TeamToday.player_username != '__placeholder__'
+        ).all()
+        for tp in team_players:
+            day_wins[tp.player_username] += 1
+
+    return dict(day_wins)
+
+
 def _get_player_ratings(session, month=None):
-    """Возвращает список (username, rating) отсортированный по убыванию рейтинга.
-    rating = player_points + goals"""
+    """Возвращает список отсортированный по убыванию рейтинга.
+    rating = player_points + goals + match_day_wins"""
     if month is None:
         month = current_month()
     stats = session.query(PlayerStat).filter(PlayerStat.month == month).all()
+    mdw = _compute_match_day_wins(session, month)
     ratings = []
     for s in stats:
-        rating = s.player_points + s.goals
-        ratings.append((s.username, rating, s.player_points, s.goals, s.matches, s.wins))
+        day_wins = mdw.get(s.username, 0)
+        rating = s.player_points + s.goals + day_wins
+        ratings.append((s.username, rating, s.player_points, s.goals, s.matches, s.wins, day_wins))
     ratings.sort(key=lambda x: x[1], reverse=True)
     return ratings
 
@@ -1205,12 +1273,12 @@ def cmd_rating(msg):
             bot.reply_to(msg, 'Рейтинг пока пуст.')
             return
         lines = [f'Рейтинг игроков за {month}', '━' * 24]
-        for i, (uname, rating, pts, goals, matches, wins) in enumerate(ratings, 1):
+        for i, (uname, rating, pts, goals, matches, wins, mdw) in enumerate(ratings, 1):
             real = dn.get(uname)
             name = f'{real} (@{uname})' if real else f'@{uname}'
             lines.append(
                 f'  {i}. {name}\n'
-                f'      Рейтинг: {rating} | {pts} очк. | {goals} гол. | {matches} матч. | {wins} побед'
+                f'      Рейтинг: {rating} | {pts} очк. | {goals} гол. | {mdw} дн.поб. | {matches} матч. | {wins} побед'
             )
         bot.reply_to(msg, '\n'.join(lines))
     finally:
@@ -1432,21 +1500,17 @@ def _build_month_stats_text(session):
                 f'{t.goals_scored} заб. | {t.goals_conceded} проп.'
             )
 
-    # Игроки
-    players = session.query(PlayerStat).filter(
-        PlayerStat.month == month,
-        PlayerStat.goals > 0
-    ).all()
-    players.sort(key=lambda p: (p.goals, p.wins), reverse=True)
-    if players:
+    # Игроки (все, отсортированные по рейтингу)
+    ratings = _get_player_ratings(session, month)
+    if ratings:
         lines.append('')
         lines.append('Игроки:')
-        for i, p in enumerate(players, 1):
-            real = dn.get(p.username)
-            name = f'{real} (@{p.username})' if real else f'@{p.username}'
+        for i, (uname, rating, pts, goals, matches, wins, mdw) in enumerate(ratings, 1):
+            real = dn.get(uname)
+            name = f'{real} (@{uname})' if real else f'@{uname}'
             lines.append(
                 f'  {i}. {name}\n'
-                f'      {p.goals} гол. | {p.matches} матч. | {p.wins} побед'
+                f'      Рейтинг: {rating} | {goals} гол. | {matches} матч. | {wins} побед'
             )
 
     return '\n'.join(lines) if len(lines) > 2 else None
