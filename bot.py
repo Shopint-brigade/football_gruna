@@ -75,15 +75,25 @@ class Goal(Base):
     goals_count = Column(Integer, nullable=False, default=0)
 
 
+class Assist(Base):
+    __tablename__ = 'assists'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    match_id = Column(Integer, ForeignKey('matches.id'), nullable=False)
+    player_username = Column(String, nullable=False)
+    assists_count = Column(Integer, nullable=False, default=0)
+
+
 class PlayerStat(Base):
     __tablename__ = 'player_stats'
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String, nullable=False)
     month = Column(String, nullable=False)  # "2026-02"
     goals = Column(Integer, nullable=False, default=0)
+    assists = Column(Integer, nullable=False, default=0)
     matches = Column(Integer, nullable=False, default=0)
     wins = Column(Integer, nullable=False, default=0)
     player_points = Column(Integer, nullable=False, default=0)  # 3 за победу, 1 за ничью
+    day_wins = Column(Integer, nullable=False, default=0)  # ручная корректировка дн.поб.
 
 
 class TeamStat(Base):
@@ -132,6 +142,28 @@ with engine.connect() as _conn:
         _conn.commit()
     except Exception:
         _conn.rollback()  # уже BIGINT — ничего не делаем
+
+    # Миграция: assists в player_stats
+    try:
+        _conn.execute(
+            __import__('sqlalchemy').text(
+                "ALTER TABLE player_stats ADD COLUMN assists INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        _conn.commit()
+    except Exception:
+        _conn.rollback()
+
+    # Миграция: day_wins в player_stats (ручная корректировка)
+    try:
+        _conn.execute(
+            __import__('sqlalchemy').text(
+                "ALTER TABLE player_stats ADD COLUMN day_wins INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        _conn.commit()
+    except Exception:
+        _conn.rollback()
 
 # ─── Состояния для /record ───────────────────────────────────────────────────
 
@@ -279,10 +311,12 @@ def cmd_help(msg):
         "/set_team_name N Имя — название команды\n"
         "/add_to_team  — добавить в команду\n"
         "/teams — показать составы\n"
-        "/record — записать матч\n"
-        "/add_goals — добавить голы к матчу\n"
+        "/record — записать матч (голы + ассисты)\n"
+        "/add_goals — добавить голы/ассисты к матчу\n"
         "/remove_goals — удалить голы из матча\n"
-        "/adjust_stats @user — корректировка статистики\n"
+        "/adjust_stats @user [поле] [значение]\n"
+        "  Поля: goals, assists, matches, wins, points, day_wins\n"
+        "  Пример: /adjust_stats @user goals +3\n"
         "/auto_teams N — авто-распределение по рейтингу\n"
         "/reset_month — обнулить статистику месяца\n"
         "/poll — отправить poll вручную\n"
@@ -433,6 +467,7 @@ def cmd_clear_today(msg):
         ]
         if today_match_ids:
             session.query(Goal).filter(Goal.match_id.in_(today_match_ids)).delete()
+            session.query(Assist).filter(Assist.match_id.in_(today_match_ids)).delete()
         session.query(Match).filter(Match.date == today()).delete()
         session.commit()
         bot.reply_to(msg, 'Данные сегодняшнего дня очищены.')
@@ -768,6 +803,31 @@ def _send_goals_keyboard(chat_id, state, text):
     bot.send_message(chat_id, text, reply_markup=markup)
 
 
+def _send_assists_keyboard(chat_id, state, text):
+    """Отправляет inline-клавиатуру с игроками для записи ассистов."""
+    dn = state.get('display_names', {})
+    players = state.get('match_players', [])
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = []
+    for u in players:
+        real = dn.get(u)
+        label = f'{real} (@{u})' if real else f'@{u}'
+        buttons.append(types.InlineKeyboardButton(label, callback_data=f'assist_player:{u}'))
+    for i in range(0, len(buttons), 2):
+        markup.row(*buttons[i:i+2])
+    markup.row(types.InlineKeyboardButton('Готово', callback_data='assist_done'))
+
+    # Текущие ассисты
+    if state.get('assists'):
+        tally = []
+        for a in state['assists']:
+            real = dn.get(a['username'])
+            name = f'{real} (@{a["username"]})' if real else f'@{a["username"]}'
+            tally.append(f'  {name}: {a["count"]} асс.')
+        text += '\n\nЗаписаны ассисты:\n' + '\n'.join(tally)
+
+    bot.send_message(chat_id, text, reply_markup=markup)
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('goal_'))
 def handle_goal_callback(call):
@@ -781,11 +841,13 @@ def handle_goal_callback(call):
     if data == 'goal_done':
         bot.answer_callback_query(call.id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
-        if state.get('mode') == 'add_goals':
-            _finish_add_goals(call.message.chat.id, state)
-        else:
-            _finish_match(call.message, state)
-        del user_states[uid]
+        # Переход к записи ассистов (шаг 5)
+        state['step'] = 5
+        state['assists'] = []
+        _send_assists_keyboard(
+            call.message.chat.id, state,
+            'Кто отдал ассист? Нажми на игрока (или Готово, если ассистов нет):'
+        )
 
     elif data.startswith('goal_player:'):
         username = data.split(':', 1)[1]
@@ -798,6 +860,38 @@ def handle_goal_callback(call):
         bot.send_message(
             call.message.chat.id,
             f'Сколько голов у {label}? Введи число:',
+        )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('assist_'))
+def handle_assist_callback(call):
+    uid = call.from_user.id
+    if uid not in user_states or user_states[uid].get('step') != 5:
+        bot.answer_callback_query(call.id, 'Сессия записи не активна.')
+        return
+    state = user_states[uid]
+    data = call.data
+
+    if data == 'assist_done':
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        if state.get('mode') == 'add_goals':
+            _finish_add_goals(call.message.chat.id, state)
+        else:
+            _finish_match(call.message, state)
+        del user_states[uid]
+
+    elif data.startswith('assist_player:'):
+        username = data.split(':', 1)[1]
+        state['awaiting_assist_count_for'] = username
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        dn = state.get('display_names', {})
+        real = dn.get(username)
+        label = f'{real} (@{username})' if real else f'@{username}'
+        bot.send_message(
+            call.message.chat.id,
+            f'Сколько ассистов у {label}? Введи число:',
         )
 
 
@@ -823,6 +917,14 @@ def _finish_match(msg, state):
                 match_id=match.id,
                 player_username=g['username'],
                 goals_count=g['count'],
+            ))
+
+        # Сохраняем ассисты
+        for a in state.get('assists', []):
+            session.add(Assist(
+                match_id=match.id,
+                player_username=a['username'],
+                assists_count=a['count'],
             ))
 
         # Обновляем статистику игроков
@@ -861,6 +963,8 @@ def _update_player_stats(session, state, month):
 
     # Голы по username
     goals_map = {g['username']: g['count'] for g in state.get('goals', [])}
+    # Ассисты по username
+    assists_map = {a['username']: a['count'] for a in state.get('assists', [])}
 
     for username in team_a_players + team_b_players:
         is_team_a = username in team_a_players
@@ -871,10 +975,11 @@ def _update_player_stats(session, state, month):
             PlayerStat.username == username, PlayerStat.month == month
         ).first()
         if not stat:
-            stat = PlayerStat(username=username, month=month, goals=0, matches=0, wins=0, player_points=0)
+            stat = PlayerStat(username=username, month=month, goals=0, assists=0, matches=0, wins=0, player_points=0)
             session.add(stat)
         stat.matches += 1
         stat.goals += goals_map.get(username, 0)
+        stat.assists += assists_map.get(username, 0)
         if win:
             stat.wins += 1
             stat.player_points += 3
@@ -987,7 +1092,7 @@ def handle_add_goals_callback(call):
 
 
 def _finish_add_goals(chat_id, state):
-    """Сохраняем дополнительные голы к существующему матчу."""
+    """Сохраняем дополнительные голы и ассисты к существующему матчу."""
     session = Session()
     try:
         match_id = state['match_id']
@@ -1008,12 +1113,37 @@ def _finish_add_goals(chat_id, state):
             else:
                 stat = PlayerStat(
                     username=g['username'], month=month,
-                    goals=g['count'], matches=0, wins=0, player_points=0
+                    goals=g['count'], assists=0, matches=0, wins=0, player_points=0
+                )
+                session.add(stat)
+        for a in state.get('assists', []):
+            session.add(Assist(
+                match_id=match_id,
+                player_username=a['username'],
+                assists_count=a['count'],
+            ))
+            # Обновляем player_stats
+            stat = session.query(PlayerStat).filter(
+                PlayerStat.username == a['username'],
+                PlayerStat.month == month
+            ).first()
+            if stat:
+                stat.assists += a['count']
+            else:
+                stat = PlayerStat(
+                    username=a['username'], month=month,
+                    goals=0, assists=a['count'], matches=0, wins=0, player_points=0
                 )
                 session.add(stat)
         session.commit()
-        total = sum(g['count'] for g in state.get('goals', []))
-        bot.send_message(chat_id, f'Добавлено {total} гол. к матчу.')
+        total_goals = sum(g['count'] for g in state.get('goals', []))
+        total_assists = sum(a['count'] for a in state.get('assists', []))
+        parts = []
+        if total_goals:
+            parts.append(f'{total_goals} гол.')
+        if total_assists:
+            parts.append(f'{total_assists} асс.')
+        bot.send_message(chat_id, f'Добавлено {", ".join(parts) if parts else "0"} к матчу.')
     finally:
         session.close()
 
@@ -1126,9 +1256,11 @@ def handle_remove_goals_callback(call):
 
 ADJUSTABLE_FIELDS = {
     'goals': ('goals', 'голы'),
+    'assists': ('assists', 'ассисты'),
     'matches': ('matches', 'матчи'),
     'wins': ('wins', 'победы'),
     'points': ('player_points', 'очки'),
+    'day_wins': ('day_wins', 'дн.поб.'),
 }
 
 
@@ -1172,17 +1304,19 @@ def cmd_adjust_stats(msg):
                 bot.reply_to(msg, f'{label}: нет статистики за {month}.')
                 return
             mdw = _compute_match_day_wins(session, month)
-            dw = mdw.get(uname, 0)
-            rating = stat.player_points + stat.goals + dw
+            auto_dw = mdw.get(uname, 0)
+            total_dw = auto_dw + stat.day_wins
+            rating = stat.player_points + stat.goals + stat.assists * 0.5 + total_dw
             bot.reply_to(
                 msg,
                 f'{label} ({month}):\n'
-                f'  Рейтинг: {rating}\n'
+                f'  Рейтинг: {rating:g}\n'
                 f'  goals: {stat.goals}\n'
+                f'  assists: {stat.assists}\n'
                 f'  matches: {stat.matches}\n'
                 f'  wins: {stat.wins}\n'
                 f'  points: {stat.player_points}\n'
-                f'  дн.поб. (авто): {dw}'
+                f'  day_wins: {stat.day_wins} (ручн.) + {auto_dw} (авто) = {total_dw}'
             )
             return
 
@@ -1201,7 +1335,7 @@ def cmd_adjust_stats(msg):
         attr_name, field_label = ADJUSTABLE_FIELDS[field_key]
 
         if not stat:
-            stat = PlayerStat(username=uname, month=month, goals=0, matches=0, wins=0, player_points=0)
+            stat = PlayerStat(username=uname, month=month, goals=0, assists=0, matches=0, wins=0, player_points=0, day_wins=0)
             session.add(stat)
 
         old_val = getattr(stat, attr_name)
@@ -1291,16 +1425,17 @@ def _compute_match_day_wins(session, month):
 
 def _get_player_ratings(session, month=None):
     """Возвращает список отсортированный по убыванию рейтинга.
-    rating = player_points + goals + match_day_wins"""
+    rating = player_points + goals + assists*0.5 + day_wins(авто) + day_wins(ручн.)"""
     if month is None:
         month = current_month()
     stats = session.query(PlayerStat).filter(PlayerStat.month == month).all()
     mdw = _compute_match_day_wins(session, month)
     ratings = []
     for s in stats:
-        day_wins = mdw.get(s.username, 0)
-        rating = s.player_points + s.goals + day_wins
-        ratings.append((s.username, rating, s.player_points, s.goals, s.matches, s.wins, day_wins))
+        auto_dw = mdw.get(s.username, 0)
+        total_dw = auto_dw + s.day_wins
+        rating = s.player_points + s.goals + s.assists * 0.5 + total_dw
+        ratings.append((s.username, rating, s.player_points, s.goals, s.assists, s.matches, s.wins, total_dw))
     ratings.sort(key=lambda x: x[1], reverse=True)
     return ratings
 
@@ -1316,12 +1451,12 @@ def cmd_rating(msg):
             bot.reply_to(msg, 'Рейтинг пока пуст.')
             return
         lines = [f'Рейтинг игроков за {month}', '━' * 24]
-        for i, (uname, rating, pts, goals, matches, wins, mdw) in enumerate(ratings, 1):
+        for i, (uname, rating, pts, goals, assists, matches, wins, mdw) in enumerate(ratings, 1):
             real = dn.get(uname)
             name = f'{real} (@{uname})' if real else f'@{uname}'
             lines.append(
                 f'  {i}. {name}\n'
-                f'      Рейтинг: {rating} | {goals} гол. | {mdw} дн.поб. | {matches} матч. | {wins} побед'
+                f'      Рейтинг: {rating:g} | {goals} гол. | {assists} асс. | {mdw} дн.поб. | {matches} матч. | {wins} побед'
             )
         bot.reply_to(msg, '\n'.join(lines))
     finally:
@@ -1468,7 +1603,7 @@ def _build_day_stats_text(session):
             nb = team_names.get(m.team_b_num, f'Команда {m.team_b_num}')
             lines.append(f'  {na}  {m.score_a} : {m.score_b}  {nb}')
 
-    # Бомбардиры дня
+    # Бомбардиры и ассистенты дня
     if today_matches:
         match_ids = [m.id for m in today_matches]
         goals = session.query(Goal).filter(Goal.match_id.in_(match_ids)).all()
@@ -1479,7 +1614,6 @@ def _build_day_stats_text(session):
                 totals[g.player_username] += g.goals_count
             lines.append('')
             lines.append('Бомбардиры дня:')
-            # Sort: most goals first, then by wins (from player_stats)
             month = current_month()
             wins_map = {}
             for uname in totals:
@@ -1490,10 +1624,23 @@ def _build_day_stats_text(session):
                 wins_map[uname] = ps.wins if ps else 0
             sorted_scorers = sorted(totals.items(), key=lambda x: (x[1], wins_map.get(x[0], 0)), reverse=True)
             for uname, cnt in sorted_scorers:
-
                 real = dn.get(uname)
                 label = f'{real} (@{uname})' if real else f'@{uname}'
                 lines.append(f'  {label}: {cnt} гол.')
+
+        assists = session.query(Assist).filter(Assist.match_id.in_(match_ids)).all()
+        if assists:
+            from collections import Counter as Cnt
+            assist_totals = Cnt()
+            for a in assists:
+                assist_totals[a.player_username] += a.assists_count
+            lines.append('')
+            lines.append('Ассистенты дня:')
+            sorted_assisters = sorted(assist_totals.items(), key=lambda x: x[1], reverse=True)
+            for uname, cnt in sorted_assisters:
+                real = dn.get(uname)
+                label = f'{real} (@{uname})' if real else f'@{uname}'
+                lines.append(f'  {label}: {cnt} асс.')
 
     # Составы (в конце)
     team_rows = session.query(TeamToday).filter(
@@ -1548,12 +1695,12 @@ def _build_month_stats_text(session):
     if ratings:
         lines.append('')
         lines.append('Игроки:')
-        for i, (uname, rating, pts, goals, matches, wins, mdw) in enumerate(ratings, 1):
+        for i, (uname, rating, pts, goals, assists, matches, wins, mdw) in enumerate(ratings, 1):
             real = dn.get(uname)
             name = f'{real} (@{uname})' if real else f'@{uname}'
             lines.append(
                 f'  {i}. {name}\n'
-                f'      Рейтинг: {rating} | {goals} гол. | {matches} матч. | {wins} побед'
+                f'      Рейтинг: {rating:g} | {goals} гол. | {assists} асс. | {matches} матч. | {wins} побед'
             )
 
     return '\n'.join(lines) if len(lines) > 2 else None
@@ -1815,7 +1962,7 @@ def cmd_mvp(msg):
         session.close()
         
 @bot.message_handler(func=lambda m: m.from_user.id in user_states
-                     and user_states[m.from_user.id].get('mode') == 'record'
+                     and user_states[m.from_user.id].get('mode') in ('record', 'add_goals')
                      and m.text is not None
                      and not m.text.startswith('/'))
 
@@ -1832,7 +1979,7 @@ def handle_record_steps(msg):
         return
 
     step = state['step']
-    teams = state['teams']
+    teams = state.get('teams', {})
 
     # Шаг 1: выбор команды A
     if step == 1:
@@ -1902,6 +2049,21 @@ def handle_record_steps(msg):
         label = f'{real} (@{username})' if real else f'@{username}'
         bot.reply_to(msg, f'{label}: {count} гол.')
         _send_goals_keyboard(msg.chat.id, state, 'Кто ещё забил?')
+
+    # Шаг 5 (подшаг): ввод кол-ва ассистов текстом
+    elif step == 5 and state.get('awaiting_assist_count_for'):
+        username = state['awaiting_assist_count_for']
+        if not text.isdigit() or int(text) < 1:
+            bot.reply_to(msg, 'Введи число ассистов (1, 2, 3, ...).')
+            return
+        count = int(text)
+        state['assists'].append({'username': username, 'count': count})
+        del state['awaiting_assist_count_for']
+        dn = state.get('display_names', {})
+        real = dn.get(username)
+        label = f'{real} (@{username})' if real else f'@{username}'
+        bot.reply_to(msg, f'{label}: {count} асс.')
+        _send_assists_keyboard(msg.chat.id, state, 'Кто ещё отдал ассист?')
 
 # ─── Запуск ──────────────────────────────────────────────────────────────────
 
