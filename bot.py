@@ -281,6 +281,7 @@ def cmd_help(msg):
         "/teams — показать составы\n"
         "/record — записать матч\n"
         "/add_goals — добавить голы к матчу\n"
+        "/remove_goals — удалить голы из матча\n"
         "/auto_teams N — авто-распределение по рейтингу\n"
         "/reset_month — обнулить статистику месяца\n"
         "/poll — отправить poll вручную\n"
@@ -1014,6 +1015,110 @@ def _finish_add_goals(chat_id, state):
         bot.send_message(chat_id, f'Добавлено {total} гол. к матчу.')
     finally:
         session.close()
+
+
+# ─── /remove_goals — удалить голы из матча ────────────────────────────────────
+
+@bot.message_handler(commands=['remove_goals'])
+def cmd_remove_goals(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    session = Session()
+    try:
+        today_matches = session.query(Match).filter(Match.date == today()).all()
+        if not today_matches:
+            bot.reply_to(msg, 'Сегодня матчей ещё не было.')
+            return
+        team_names = get_team_names_today(session)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for m in today_matches:
+            na = team_names.get(m.team_a_num, f'#{m.team_a_num}')
+            nb = team_names.get(m.team_b_num, f'#{m.team_b_num}')
+            label = f'{na} {m.score_a}:{m.score_b} {nb}'
+            markup.add(types.InlineKeyboardButton(label, callback_data=f'rmg_match:{m.id}'))
+        bot.reply_to(msg, 'Выбери матч для удаления голов:', reply_markup=markup)
+    finally:
+        session.close()
+
+
+def _send_remove_goals_keyboard(chat_id, match_id):
+    """Показывает записанные голы матча как кнопки для удаления."""
+    session = Session()
+    try:
+        match = session.query(Match).filter(Match.id == match_id).first()
+        if not match:
+            bot.send_message(chat_id, 'Матч не найден.')
+            return
+        team_names = get_team_names_today(session)
+        na = team_names.get(match.team_a_num, f'#{match.team_a_num}')
+        nb = team_names.get(match.team_b_num, f'#{match.team_b_num}')
+        goals = session.query(Goal).filter(Goal.match_id == match_id).all()
+        dn = get_display_names(session)
+        if not goals:
+            bot.send_message(chat_id, f'Матч {na} {match.score_a}:{match.score_b} {nb}\nГолов не записано.')
+            return
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for g in goals:
+            real = dn.get(g.player_username)
+            label = f'{real} ({g.goals_count} гол.)' if real else f'@{g.player_username} ({g.goals_count} гол.)'
+            markup.add(types.InlineKeyboardButton(
+                f'❌ {label}', callback_data=f'rmg_del:{g.id}:{match_id}'
+            ))
+        markup.add(types.InlineKeyboardButton('Готово', callback_data=f'rmg_done'))
+        bot.send_message(
+            chat_id,
+            f'Матч: {na} {match.score_a}:{match.score_b} {nb}\nНажми чтобы удалить:',
+            reply_markup=markup
+        )
+    finally:
+        session.close()
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rmg_'))
+def handle_remove_goals_callback(call):
+    uid = call.from_user.id
+    if not is_admin(uid):
+        bot.answer_callback_query(call.id, 'Только для админов.')
+        return
+    data = call.data
+
+    if data.startswith('rmg_match:'):
+        match_id = int(data.split(':')[1])
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        _send_remove_goals_keyboard(call.message.chat.id, match_id)
+
+    elif data.startswith('rmg_del:'):
+        parts = data.split(':')
+        goal_id = int(parts[1])
+        match_id = int(parts[2])
+        session = Session()
+        try:
+            goal = session.query(Goal).filter(Goal.id == goal_id).first()
+            if goal:
+                # Вычитаем голы из player_stats
+                match = session.query(Match).filter(Match.id == match_id).first()
+                month = match.month if match else current_month()
+                stat = session.query(PlayerStat).filter(
+                    PlayerStat.username == goal.player_username,
+                    PlayerStat.month == month
+                ).first()
+                if stat:
+                    stat.goals = max(0, stat.goals - goal.goals_count)
+                session.delete(goal)
+                session.commit()
+                bot.answer_callback_query(call.id, 'Удалено')
+            else:
+                bot.answer_callback_query(call.id, 'Уже удалено')
+        finally:
+            session.close()
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        _send_remove_goals_keyboard(call.message.chat.id, match_id)
+
+    elif data == 'rmg_done':
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        bot.send_message(call.message.chat.id, 'Готово.')
 
 
 # ─── /rating — рейтинг игроков ────────────────────────────────────────────────
