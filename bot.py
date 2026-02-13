@@ -282,6 +282,7 @@ def cmd_help(msg):
         "/record — записать матч\n"
         "/add_goals — добавить голы к матчу\n"
         "/remove_goals — удалить голы из матча\n"
+        "/adjust_goals @user ±N — корректировка голов\n"
         "/auto_teams N — авто-распределение по рейтингу\n"
         "/reset_month — обнулить статистику месяца\n"
         "/poll — отправить poll вручную\n"
@@ -1119,6 +1120,62 @@ def handle_remove_goals_callback(call):
         bot.answer_callback_query(call.id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
         bot.send_message(call.message.chat.id, 'Готово.')
+
+
+# ─── /adjust_goals — корректировка голов в статистике месяца ──────────────────
+
+@bot.message_handler(commands=['adjust_goals'])
+def cmd_adjust_goals(msg):
+    """Корректировка голов игрока в месячной статистике.
+    /adjust_goals @username +3   — добавить 3 гола
+    /adjust_goals @username -2   — убрать 2 гола
+    /adjust_goals @username 5    — установить ровно 5 голов
+    """
+    if not is_admin(msg.from_user.id):
+        return
+    parts = msg.text.split()
+    if len(parts) < 3:
+        bot.reply_to(
+            msg,
+            'Формат:\n'
+            '/adjust_goals @username +3 — добавить\n'
+            '/adjust_goals @username -2 — убрать\n'
+            '/adjust_goals @username 5 — установить'
+        )
+        return
+    uname = parts[1].lstrip('@')
+    val_str = parts[2]
+    session = Session()
+    try:
+        month = current_month()
+        stat = session.query(PlayerStat).filter(
+            PlayerStat.username == uname, PlayerStat.month == month
+        ).first()
+        dn = get_display_names(session)
+        real = dn.get(uname)
+        label = f'{real} (@{uname})' if real else f'@{uname}'
+
+        if not stat:
+            # Создаём запись если нет
+            stat = PlayerStat(username=uname, month=month, goals=0, matches=0, wins=0, player_points=0)
+            session.add(stat)
+
+        old_goals = stat.goals
+        if val_str.startswith('+'):
+            delta = int(val_str[1:])
+            stat.goals += delta
+        elif val_str.startswith('-'):
+            delta = int(val_str[1:])
+            stat.goals = max(0, stat.goals - delta)
+        else:
+            stat.goals = max(0, int(val_str))
+
+        session.commit()
+        bot.reply_to(msg, f'{label}: голы {old_goals} → {stat.goals} (месяц {month})')
+    except ValueError:
+        bot.reply_to(msg, 'Некорректное число. Формат: /adjust_goals @username +3')
+    finally:
+        session.close()
 
 
 # ─── /rating — рейтинг игроков ────────────────────────────────────────────────
