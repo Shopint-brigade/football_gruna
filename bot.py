@@ -83,6 +83,7 @@ class PlayerStat(Base):
     goals = Column(Integer, nullable=False, default=0)
     matches = Column(Integer, nullable=False, default=0)
     wins = Column(Integer, nullable=False, default=0)
+    player_points = Column(Integer, nullable=False, default=0)  # 3 за победу, 1 за ничью
 
 
 class TeamStat(Base):
@@ -109,6 +110,17 @@ with engine.connect() as _conn:
         _conn.commit()
     except Exception:
         _conn.rollback()  # колонка уже существует — ничего не делаем
+
+    # Миграция: player_points в player_stats
+    try:
+        _conn.execute(
+            __import__('sqlalchemy').text(
+                "ALTER TABLE player_stats ADD COLUMN player_points INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        _conn.commit()
+    except Exception:
+        _conn.rollback()
 
     # Миграция: user_id INTEGER → BIGINT (Telegram ID-шники могут превышать 2^31)
     try:
@@ -268,6 +280,10 @@ def cmd_help(msg):
         "/add_to_team  — добавить в команду\n"
         "/teams — показать составы\n"
         "/record — записать матч\n"
+        "/add_goals — добавить голы к матчу\n"
+        "/remove_goals — удалить голы из матча\n"
+        "/adjust_goals @user ±N — корректировка голов\n"
+        "/auto_teams N — авто-распределение по рейтингу\n"
         "/reset_month — обнулить статистику месяца\n"
         "/poll — отправить poll вручную\n"
         "/mvp — poll MVP дня\n"
@@ -277,6 +293,7 @@ def cmd_help(msg):
         "/stats — вся статистика\n"
         "/stats_day — статистика дня\n"
         "/stats_month — статистика месяца\n"
+        "/rating — рейтинг игроков\n"
     )
     bot.reply_to(msg, text)
 
@@ -764,7 +781,10 @@ def handle_goal_callback(call):
     if data == 'goal_done':
         bot.answer_callback_query(call.id)
         bot.delete_message(call.message.chat.id, call.message.message_id)
-        _finish_match(call.message, state)
+        if state.get('mode') == 'add_goals':
+            _finish_add_goals(call.message.chat.id, state)
+        else:
+            _finish_match(call.message, state)
         del user_states[uid]
 
     elif data.startswith('goal_player:'):
@@ -845,17 +865,21 @@ def _update_player_stats(session, state, month):
     for username in team_a_players + team_b_players:
         is_team_a = username in team_a_players
         win = (sa > sb and is_team_a) or (sb > sa and not is_team_a)
+        draw = (sa == sb)
 
         stat = session.query(PlayerStat).filter(
             PlayerStat.username == username, PlayerStat.month == month
         ).first()
         if not stat:
-            stat = PlayerStat(username=username, month=month, goals=0, matches=0, wins=0)
+            stat = PlayerStat(username=username, month=month, goals=0, matches=0, wins=0, player_points=0)
             session.add(stat)
         stat.matches += 1
         stat.goals += goals_map.get(username, 0)
         if win:
             stat.wins += 1
+            stat.player_points += 3
+        elif draw:
+            stat.player_points += 1
 
 
 def _update_team_stats(session, state, month):
@@ -881,6 +905,402 @@ def _update_team_stats(session, state, month):
             stat.points += 3
         elif score_for == score_against:
             stat.points += 1
+
+
+# ─── /add_goals — добавить голы к существующему матчу ─────────────────────────
+
+@bot.message_handler(commands=['add_goals'])
+def cmd_add_goals(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    session = Session()
+    try:
+        today_matches = session.query(Match).filter(Match.date == today()).all()
+        if not today_matches:
+            bot.reply_to(msg, 'Сегодня матчей ещё не было.')
+            return
+        team_names = get_team_names_today(session)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for m in today_matches:
+            na = team_names.get(m.team_a_num, f'#{m.team_a_num}')
+            nb = team_names.get(m.team_b_num, f'#{m.team_b_num}')
+            label = f'{na} {m.score_a}:{m.score_b} {nb}'
+            markup.add(types.InlineKeyboardButton(label, callback_data=f'addg_match:{m.id}'))
+        bot.reply_to(msg, 'Выбери матч для добавления голов:', reply_markup=markup)
+    finally:
+        session.close()
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('addg_'))
+def handle_add_goals_callback(call):
+    uid = call.from_user.id
+    if not is_admin(uid):
+        bot.answer_callback_query(call.id, 'Только для админов.')
+        return
+    data = call.data
+
+    if data.startswith('addg_match:'):
+        match_id = int(data.split(':')[1])
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        session = Session()
+        try:
+            match = session.query(Match).filter(Match.id == match_id).first()
+            if not match:
+                bot.send_message(call.message.chat.id, 'Матч не найден.')
+                return
+            team_names = get_team_names_today(session)
+            dn = get_display_names(session)
+            team_players = session.query(TeamToday).filter(
+                TeamToday.date == today(),
+                TeamToday.team_number.in_([match.team_a_num, match.team_b_num]),
+                TeamToday.player_username != '__placeholder__'
+            ).all()
+            match_players = [t.player_username for t in team_players]
+        finally:
+            session.close()
+        na = team_names.get(match.team_a_num, f'#{match.team_a_num}')
+        nb = team_names.get(match.team_b_num, f'#{match.team_b_num}')
+        state = {
+            'mode': 'add_goals',
+            'step': 4,
+            'match_id': match_id,
+            'match_month': match.month,
+            'match_players': match_players,
+            'display_names': dn,
+            'goals': [],
+        }
+        user_states[uid] = state
+        _send_goals_keyboard(
+            call.message.chat.id, state,
+            f'Матч: {na} {match.score_a}:{match.score_b} {nb}\nКто забил? Нажми на игрока:'
+        )
+
+    elif data == 'addg_done':
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        if uid not in user_states or user_states[uid].get('mode') != 'add_goals':
+            return
+        state = user_states[uid]
+        _finish_add_goals(call.message.chat.id, state)
+        del user_states[uid]
+
+
+def _finish_add_goals(chat_id, state):
+    """Сохраняем дополнительные голы к существующему матчу."""
+    session = Session()
+    try:
+        match_id = state['match_id']
+        month = state['match_month']
+        for g in state.get('goals', []):
+            session.add(Goal(
+                match_id=match_id,
+                player_username=g['username'],
+                goals_count=g['count'],
+            ))
+            # Обновляем player_stats
+            stat = session.query(PlayerStat).filter(
+                PlayerStat.username == g['username'],
+                PlayerStat.month == month
+            ).first()
+            if stat:
+                stat.goals += g['count']
+            else:
+                stat = PlayerStat(
+                    username=g['username'], month=month,
+                    goals=g['count'], matches=0, wins=0, player_points=0
+                )
+                session.add(stat)
+        session.commit()
+        total = sum(g['count'] for g in state.get('goals', []))
+        bot.send_message(chat_id, f'Добавлено {total} гол. к матчу.')
+    finally:
+        session.close()
+
+
+# ─── /remove_goals — удалить голы из матча ────────────────────────────────────
+
+@bot.message_handler(commands=['remove_goals'])
+def cmd_remove_goals(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    session = Session()
+    try:
+        today_matches = session.query(Match).filter(Match.date == today()).all()
+        if not today_matches:
+            bot.reply_to(msg, 'Сегодня матчей ещё не было.')
+            return
+        team_names = get_team_names_today(session)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for m in today_matches:
+            na = team_names.get(m.team_a_num, f'#{m.team_a_num}')
+            nb = team_names.get(m.team_b_num, f'#{m.team_b_num}')
+            label = f'{na} {m.score_a}:{m.score_b} {nb}'
+            markup.add(types.InlineKeyboardButton(label, callback_data=f'rmg_match:{m.id}'))
+        bot.reply_to(msg, 'Выбери матч для удаления голов:', reply_markup=markup)
+    finally:
+        session.close()
+
+
+def _send_remove_goals_keyboard(chat_id, match_id):
+    """Показывает записанные голы матча как кнопки для удаления."""
+    session = Session()
+    try:
+        match = session.query(Match).filter(Match.id == match_id).first()
+        if not match:
+            bot.send_message(chat_id, 'Матч не найден.')
+            return
+        team_names = get_team_names_today(session)
+        na = team_names.get(match.team_a_num, f'#{match.team_a_num}')
+        nb = team_names.get(match.team_b_num, f'#{match.team_b_num}')
+        goals = session.query(Goal).filter(Goal.match_id == match_id).all()
+        dn = get_display_names(session)
+        if not goals:
+            bot.send_message(chat_id, f'Матч {na} {match.score_a}:{match.score_b} {nb}\nГолов не записано.')
+            return
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for g in goals:
+            real = dn.get(g.player_username)
+            label = f'{real} ({g.goals_count} гол.)' if real else f'@{g.player_username} ({g.goals_count} гол.)'
+            markup.add(types.InlineKeyboardButton(
+                f'❌ {label}', callback_data=f'rmg_del:{g.id}:{match_id}'
+            ))
+        markup.add(types.InlineKeyboardButton('Готово', callback_data=f'rmg_done'))
+        bot.send_message(
+            chat_id,
+            f'Матч: {na} {match.score_a}:{match.score_b} {nb}\nНажми чтобы удалить:',
+            reply_markup=markup
+        )
+    finally:
+        session.close()
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rmg_'))
+def handle_remove_goals_callback(call):
+    uid = call.from_user.id
+    if not is_admin(uid):
+        bot.answer_callback_query(call.id, 'Только для админов.')
+        return
+    data = call.data
+
+    if data.startswith('rmg_match:'):
+        match_id = int(data.split(':')[1])
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        _send_remove_goals_keyboard(call.message.chat.id, match_id)
+
+    elif data.startswith('rmg_del:'):
+        parts = data.split(':')
+        goal_id = int(parts[1])
+        match_id = int(parts[2])
+        session = Session()
+        try:
+            goal = session.query(Goal).filter(Goal.id == goal_id).first()
+            if goal:
+                # Вычитаем голы из player_stats
+                match = session.query(Match).filter(Match.id == match_id).first()
+                month = match.month if match else current_month()
+                stat = session.query(PlayerStat).filter(
+                    PlayerStat.username == goal.player_username,
+                    PlayerStat.month == month
+                ).first()
+                if stat:
+                    stat.goals = max(0, stat.goals - goal.goals_count)
+                session.delete(goal)
+                session.commit()
+                bot.answer_callback_query(call.id, 'Удалено')
+            else:
+                bot.answer_callback_query(call.id, 'Уже удалено')
+        finally:
+            session.close()
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        _send_remove_goals_keyboard(call.message.chat.id, match_id)
+
+    elif data == 'rmg_done':
+        bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        bot.send_message(call.message.chat.id, 'Готово.')
+
+
+# ─── /adjust_goals — корректировка голов в статистике месяца ──────────────────
+
+@bot.message_handler(commands=['adjust_goals'])
+def cmd_adjust_goals(msg):
+    """Корректировка голов игрока в месячной статистике.
+    /adjust_goals @username +3   — добавить 3 гола
+    /adjust_goals @username -2   — убрать 2 гола
+    /adjust_goals @username 5    — установить ровно 5 голов
+    """
+    if not is_admin(msg.from_user.id):
+        return
+    parts = msg.text.split()
+    if len(parts) < 3:
+        bot.reply_to(
+            msg,
+            'Формат:\n'
+            '/adjust_goals @username +3 — добавить\n'
+            '/adjust_goals @username -2 — убрать\n'
+            '/adjust_goals @username 5 — установить'
+        )
+        return
+    uname = parts[1].lstrip('@')
+    val_str = parts[2]
+    session = Session()
+    try:
+        month = current_month()
+        stat = session.query(PlayerStat).filter(
+            PlayerStat.username == uname, PlayerStat.month == month
+        ).first()
+        dn = get_display_names(session)
+        real = dn.get(uname)
+        label = f'{real} (@{uname})' if real else f'@{uname}'
+
+        if not stat:
+            # Создаём запись если нет
+            stat = PlayerStat(username=uname, month=month, goals=0, matches=0, wins=0, player_points=0)
+            session.add(stat)
+
+        old_goals = stat.goals
+        if val_str.startswith('+'):
+            delta = int(val_str[1:])
+            stat.goals += delta
+        elif val_str.startswith('-'):
+            delta = int(val_str[1:])
+            stat.goals = max(0, stat.goals - delta)
+        else:
+            stat.goals = max(0, int(val_str))
+
+        session.commit()
+        bot.reply_to(msg, f'{label}: голы {old_goals} → {stat.goals} (месяц {month})')
+    except ValueError:
+        bot.reply_to(msg, 'Некорректное число. Формат: /adjust_goals @username +3')
+    finally:
+        session.close()
+
+
+# ─── /rating — рейтинг игроков ────────────────────────────────────────────────
+
+def _get_player_ratings(session, month=None):
+    """Возвращает список (username, rating) отсортированный по убыванию рейтинга.
+    rating = player_points + goals"""
+    if month is None:
+        month = current_month()
+    stats = session.query(PlayerStat).filter(PlayerStat.month == month).all()
+    ratings = []
+    for s in stats:
+        rating = s.player_points + s.goals
+        ratings.append((s.username, rating, s.player_points, s.goals, s.matches, s.wins))
+    ratings.sort(key=lambda x: x[1], reverse=True)
+    return ratings
+
+
+@bot.message_handler(commands=['rating'])
+def cmd_rating(msg):
+    session = Session()
+    try:
+        month = current_month()
+        ratings = _get_player_ratings(session, month)
+        dn = get_display_names(session)
+        if not ratings:
+            bot.reply_to(msg, 'Рейтинг пока пуст.')
+            return
+        lines = [f'Рейтинг игроков за {month}', '━' * 24]
+        for i, (uname, rating, pts, goals, matches, wins) in enumerate(ratings, 1):
+            real = dn.get(uname)
+            name = f'{real} (@{uname})' if real else f'@{uname}'
+            lines.append(
+                f'  {i}. {name}\n'
+                f'      Рейтинг: {rating} | {pts} очк. | {goals} гол. | {matches} матч. | {wins} побед'
+            )
+        bot.reply_to(msg, '\n'.join(lines))
+    finally:
+        session.close()
+
+
+# ─── /auto_teams — автоматическое распределение по рейтингу ──────────────────
+
+@bot.message_handler(commands=['auto_teams'])
+def cmd_auto_teams(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    parts = msg.text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        bot.reply_to(msg, 'Формат: /auto_teams N (2–6)')
+        return
+    n = int(parts[1])
+    if n < 2 or n > 6:
+        bot.reply_to(msg, 'Кол-во команд: от 2 до 6.')
+        return
+    session = Session()
+    try:
+        players = get_today_players(session)
+        if not players:
+            bot.reply_to(msg, 'Сегодня пока никто не записался.')
+            return
+        if len(players) < n:
+            bot.reply_to(msg, f'Игроков ({len(players)}) меньше, чем команд ({n}).')
+            return
+
+        # Получаем рейтинги
+        month = current_month()
+        ratings = _get_player_ratings(session, month)
+        rating_map = {uname: rating for uname, rating, *_ in ratings}
+        dn = get_display_names(session)
+
+        # Сортируем сегодняшних игроков по рейтингу (убыв.), новички с рейтингом 0
+        player_list = sorted(
+            [p.username for p in players],
+            key=lambda u: rating_map.get(u, 0),
+            reverse=True
+        )
+
+        # Snake draft: раунд 1 — forward, все остальные — reverse
+        teams = {i: [] for i in range(1, n + 1)}
+        team_order = list(range(1, n + 1))  # [1, 2, 3]
+        reverse_order = list(reversed(team_order))  # [3, 2, 1]
+
+        idx = 0
+        round_num = 0
+        while idx < len(player_list):
+            order = team_order if round_num == 0 else reverse_order
+            for team_num in order:
+                if idx >= len(player_list):
+                    break
+                teams[team_num].append(player_list[idx])
+                idx += 1
+            round_num += 1
+
+        # Удаляем старые команды и создаём новые
+        session.query(TeamToday).filter(TeamToday.date == today()).delete()
+        for i in range(1, n + 1):
+            team_name = DEFAULT_TEAM_NAMES[i - 1]
+            # Placeholder для пустых команд
+            session.add(TeamToday(
+                date=today(), team_number=i,
+                team_name=team_name, player_username='__placeholder__'
+            ))
+            for username in teams[i]:
+                session.add(TeamToday(
+                    date=today(), team_number=i,
+                    team_name=team_name, player_username=username
+                ))
+        session.commit()
+
+        # Вывод результата
+        lines = [f'Авто-распределение ({n} команд, {len(player_list)} игроков):']
+        lines.append('')
+        for i in range(1, n + 1):
+            team_name = DEFAULT_TEAM_NAMES[i - 1]
+            parts_list = []
+            for u in teams[i]:
+                real = dn.get(u)
+                r = rating_map.get(u, 0)
+                label = f'{real} ({r})' if real else f'@{u} ({r})'
+                parts_list.append(label)
+            lines.append(f'#{i} «{team_name}»: {", ".join(parts_list)}')
+        bot.reply_to(msg, '\n'.join(lines))
+    finally:
+        session.close()
 
 
 # ─── /stats ──────────────────────────────────────────────────────────────────
