@@ -320,7 +320,8 @@ def cmd_help(msg):
         "/poll — отправить poll вручную\n"
         "/mvp — poll MVP дня\n"
         "/stats_day_img — день картинкой\n"
-        "/stats_month_img — месяц картинкой\n\n"
+        "/stats_month_img — команды картинкой\n"
+        "/rating_img — рейтинг картинкой\n\n"
         "Для всех:\n"
         "/stats — вся статистика\n"
         "/stats_day — статистика дня\n"
@@ -1777,10 +1778,46 @@ def cmd_stats_month_img(msg):
         return
     session = Session()
     try:
-        text = _build_month_stats_text(session)
+        month = current_month()
+        dn = get_display_names(session)
+        lines = [f'Команды за {month}']
+        lines.append('━' * 24)
+        teams = session.query(TeamStat).filter(TeamStat.month == month).all()
+        teams.sort(key=lambda t: (t.points, t.goals_scored, -t.goals_conceded), reverse=True)
+        if teams:
+            for t in teams:
+                tname = t.team_num_or_name.split('_', 1)[1] if '_' in t.team_num_or_name else t.team_num_or_name
+                lines.append(
+                    f'  {tname}: {t.points} очк. | '
+                    f'{t.goals_scored} заб. | {t.goals_conceded} проп.'
+                )
+        text = '\n'.join(lines) if len(lines) > 2 else None
     finally:
         session.close()
-    _send_stats_image(msg, text, f'Статистика за {current_month()}')
+    _send_stats_image(msg, text, f'Команды за {current_month()}')
+
+
+@bot.message_handler(commands=['rating_img'])
+def cmd_rating_img(msg):
+    if not is_admin(msg.from_user.id):
+        return
+    session = Session()
+    try:
+        month = current_month()
+        dn = get_display_names(session)
+        ratings = _get_player_ratings(session, month)
+        if not ratings:
+            bot.reply_to(msg, 'Рейтинг пока пуст.')
+            return
+        lines = [f'Рейтинг игроков за {month}', '━' * 24]
+        for i, (uname, rating, matches) in enumerate(ratings, 1):
+            real = dn.get(uname)
+            name = f'{real} (@{uname})' if real else f'@{uname}'
+            lines.append(f'  {i}. {name} — {rating} очк. ({matches} матч.)')
+        text = '\n'.join(lines)
+    finally:
+        session.close()
+    _send_stats_image(msg, text, f'Рейтинг за {current_month()}')
 
 
 # ─── /reset_month ────────────────────────────────────────────────────────────
