@@ -945,9 +945,9 @@ def _update_player_stats(session, state, month):
             PlayerStat.username == tp.player_username, PlayerStat.month == month
         ).first()
         if not stat:
-            stat = PlayerStat(username=tp.player_username, month=month)
+            stat = PlayerStat(username=tp.player_username, month=month, matches=0)
             session.add(stat)
-        stat.matches += 1
+        stat.matches = (stat.matches or 0) + 1
 
 
 def _update_team_stats(session, state, month):
