@@ -95,7 +95,7 @@ def send_thursday_poll():
     bot.send_poll(
         chat_id=CHAT_ID,
         question='Сегодня вечером играем?',
-        options=['Играю по абонементу', 'Не играю сегодня', 'Хочу вписаться за разовую'],
+        options=['Играю сегодня', 'Не играю сегодня', 'под вопросом'],
         is_anonymous=False,
         allows_multiple_answers=False
     )
